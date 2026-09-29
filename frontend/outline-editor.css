@@ -1,0 +1,132 @@
+.outline-editor {
+  display: grid;
+  gap: 14px;
+}
+
+.outline-editor h3 {
+  margin: 0 0 14px;
+  font-size: 15px;
+}
+
+.outline-core,
+.outline-section {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fafaf5;
+  padding: 16px;
+}
+
+.outline-section > summary {
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.outline-section > summary small {
+  font-weight: 400;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.outline-section[open] > summary {
+  margin-bottom: 15px;
+}
+
+.outline-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 14px;
+}
+
+.outline-card {
+  border: 1px solid #d9ded5;
+  border-radius: 7px;
+  background: white;
+  padding: 14px;
+  margin: 0 0 12px;
+}
+
+.outline-card.compact {
+  padding: 12px;
+}
+
+.outline-card > summary {
+  cursor: pointer;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+.outline-card label {
+  margin-bottom: 10px;
+}
+
+.outline-card small {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  margin-top: 4px;
+}
+
+.outline-subhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  margin: 8px 0 10px;
+}
+
+.outline-subhead button,
+.outline-section > button {
+  font-size: 11px;
+  padding: 6px 9px;
+}
+
+.outline-stages,
+.outline-events {
+  margin-left: 10px;
+}
+
+.outline-stage {
+  background: #f8faf5;
+}
+
+.outline-event {
+  border-left: 3px solid #b8c8bb;
+}
+
+.danger-link {
+  background: transparent;
+  color: var(--red);
+  border-color: #e7c4bf;
+  font-size: 10px;
+  padding: 5px 8px;
+}
+
+.outline-editor select[multiple] {
+  min-height: 100px;
+}
+
+.outline-editor > .controls {
+  position: sticky;
+  bottom: 0;
+  background: linear-gradient(transparent, var(--paper) 20%);
+  padding-top: 24px;
+  padding-bottom: 8px;
+  z-index: 2;
+}
+
+@media (max-width: 700px) {
+  .outline-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .outline-stages,
+  .outline-events {
+    margin-left: 0;
+  }
+}

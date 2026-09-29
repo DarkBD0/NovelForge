@@ -1,0 +1,42 @@
+.shadow-summary {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  font-size: 11px;
+  line-height: 1.55;
+}
+.shadow-summary strong { font-size: 12px; }
+.shadow-report {
+  margin: 8px 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  padding: 8px;
+}
+.shadow-report summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.shadow-report p, .shadow-report li { font-size: 11px; }
+.shadow-error { color: var(--red); }
+.feedback-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  font-size: 10px;
+}
+.feedback-buttons button { font-size: 10px; padding: 4px 6px; }
+.feedback-buttons button.active {
+  background: var(--green);
+  border-color: var(--green);
+  color: white;
+}

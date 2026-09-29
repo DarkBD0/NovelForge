@@ -1,0 +1,33 @@
+server:
+  address: 127.0.0.1
+  port: ${NOVELFORGE_PORT:8080}
+  error:
+    include-message: never
+    include-stacktrace: never
+spring:
+  application:
+    name: novelforge
+  datasource:
+    url: jdbc:h2:file:./data/novelforge;DB_CLOSE_ON_EXIT=FALSE
+    username: sa
+    password: ''
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/migration/V1__initial.sql
+  h2:
+    console:
+      enabled: false
+novelforge:
+  experiments:
+    continuity-shadow-enabled: ${NOVELFORGE_CONTINUITY_SHADOW_ENABLED:false}
+    plot-foreshadow-shadow-enabled: ${NOVELFORGE_PLOT_FORESHADOW_SHADOW_ENABLED:false}
+  model:
+    mode: ${NOVELFORGE_MODEL_MODE:demo}
+    base-url: ${NOVELFORGE_MODEL_BASE_URL:}
+    api-key: ${NOVELFORGE_MODEL_API_KEY:}
+    name: ${NOVELFORGE_MODEL_NAME:}
+    timeout-seconds: ${NOVELFORGE_MODEL_TIMEOUT:180}
+    max-output-tokens: ${NOVELFORGE_MAX_OUTPUT_TOKENS:12000}
+    max-context-chars: ${NOVELFORGE_MAX_CONTEXT_CHARS:160000}
+    response-format: ${NOVELFORGE_RESPONSE_FORMAT:none}

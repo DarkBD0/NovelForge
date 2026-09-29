@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NovelForge · 长篇创作工作台</title>
+  <meta name="description" content="本机运行的长篇小说创作工作台。逐章确认，滚动规划，让故事有始有终。">
+  <link rel="icon" href="data:,"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/word-settings.css"><link rel="stylesheet" href="/shadow-experiments.css"><link rel="stylesheet" href="/outline-editor.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/"><span class="monogram">NF</span><span>NovelForge<small>长篇创作工作台</small></span></a><div class="top-status"><span class="local">● 仅本机</span><span id="modelMode">正在连接…</span><button id="helpButton" class="quiet">模型配置</button></div></header>
+  <div id="errorBar" class="error-bar" role="alert" hidden></div>
+  <div class="app-shell">
+    <aside class="books"><div class="section-label">我的作品<button id="newButton" title="新建小说">＋ 新建</button></div><nav id="bookList" aria-label="小说列表"></nav><div class="aside-note">大纲约束方向<br>规划连接章节<br>你的确认推动故事</div></aside>
+    <main id="main" tabindex="-1"><section class="welcome"><div class="eyebrow">从一个想法，到完整故事</div><h1>给故事一个开端。</h1><p>输入书名与简介，从大纲开始。每一步都能修改，确认后才继续。</p><button class="primary" id="firstBook">新建第一部小说</button><p class="muted">内容保存在本机。关闭浏览器不会丢失已保存的进度。</p></section></main>
+  </div>
+  <dialog id="createDialog"><form id="createForm"><div class="dialog-heading"><h2>新建小说</h2><button type="button" id="closeCreate" class="quiet">关闭</button></div><label>书名<input name="title" required maxlength="200" placeholder="给你的故事起个名字"></label><label>简介<textarea name="synopsis" rows="4" required maxlength="20000" placeholder="谁，想完成什么，又将面对什么？"></textarea></label><label>目标字数<input name="targetWords" type="number" min="10" max="50000000" value="100000"></label><p class="hint" id="targetHint">目标字数是篇幅参考；故事完整度优先，不会为了达标强制扩写。</p><label>补充要求（可选）<textarea name="requirements" rows="2" maxlength="20000" placeholder="题材、文风、人物或世界观要求"></textarea></label><p class="hint">新作品默认开启自动文风：章节内容检查通过后，会额外调用模型检查文风，并且最多安全处理一轮；创建后可随时关闭。</p><button class="primary" type="submit">创建作品</button></form></dialog>
+  <dialog id="helpDialog"><div class="dialog-heading"><h2>模型与运行模式</h2><button id="closeHelp" class="quiet">关闭</button></div><p>离线演示使用固定的五章灯塔故事，仅验证生成、确认、修改和完结流程，不代表真实写作质量。</p><p>使用真实模型：在启动服务前设置下列环境变量，然后重新运行启动脚本。密钥只留在后端。</p><pre>NOVELFORGE_MODEL_MODE=http
+NOVELFORGE_MODEL_BASE_URL=你的兼容接口基础地址（通常以 /v1 结尾）
+NOVELFORGE_MODEL_NAME=模型名称
+            NOVELFORGE_MODEL_API_KEY=replace-with-your-private-key（本机免密模型可不填）</pre><p>接口需支持 Chat Completions 与 JSON 指令输出。远程调用会将该任务的小说上下文发送到你配置的服务；请自行确认服务与费用。</p><p class="hint">不支持联网的演示模式与真实模型模式不会自动互相回退。完整说明见项目 README。</p></dialog>
+  <div id="toast" role="status" hidden></div>
+</body>
+</html>

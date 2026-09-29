@@ -1,0 +1,103 @@
+.metrics {
+  min-width: 220px;
+  position: relative;
+}
+
+.metrics progress {
+  width: 220px;
+}
+
+.word-settings {
+  position: relative;
+}
+
+.project-settings {
+  margin-top: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.auto-style-setting {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  color: var(--green);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.auto-style-setting input {
+  width: auto;
+  margin: 0;
+}
+
+.auto-style-note {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.word-settings > summary {
+  display: inline-block;
+  list-style: none;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  color: var(--green);
+  font-size: 11px;
+  padding: 6px 9px;
+}
+
+.word-settings > summary::-webkit-details-marker {
+  display: none;
+}
+
+.word-settings > summary:hover {
+  background: var(--soft);
+}
+
+.budget-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 30;
+  width: 300px;
+  padding: 16px;
+  text-align: left;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  box-shadow: 0 10px 35px #172b2928;
+}
+
+.budget-popover label {
+  margin-bottom: 11px;
+}
+
+.budget-popover p {
+  margin: 10px 0 0;
+  max-width: none;
+}
+
+@media (max-width: 700px) {
+  .metrics {
+    min-width: 150px;
+  }
+
+  .metrics progress {
+    width: 150px;
+  }
+
+  .budget-popover {
+    width: min(300px, calc(100vw - 36px));
+  }
+}
