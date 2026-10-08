@@ -43,6 +43,35 @@ class ContinuityReviewPolicyTest {
         });
     }
 
+    @Test void infersRelationForExplicitColleagueAndDelegationAttributes() {
+        String evidence="冲突对象：林澈与周岚｜冲突属性：是否共事、是否受托｜原状态时间：第一章｜候选状态时间：第二章｜"
+                +"同一时点：“是”｜推进授权：“无”｜候选原文：“以前从没共事过”｜已确认依据：“二人共事四年”";
+        ReviewIssue missingId=new ReviewIssue("当前段落","共事和委托状态互斥",evidence,"统一关系状态","必须修正");
+        Review result=policy.normalize(review(missingId));
+        assertThat(result.issueDetails()).singleElement()
+                .extracting(ReviewIssue::issueId).isEqualTo("CONTINUITY:RELATION:HIGH");
+    }
+
+    @Test void infersAbsoluteTimeForExplicitShiftRange() {
+        String evidence="冲突对象：周海值班时段｜冲突属性：具体起止时间｜原状态时间：第十章｜候选状态时间：当前章节｜"
+                +"同一时点：“是”｜推进授权：“无”｜候选原文：“上午十点到下午六点”｜"
+                +"已确认依据：“夜间十点到次日清晨六点”";
+        ReviewIssue missingId=new ReviewIssue("当前段落","同一次值班的起止时间互斥",evidence,
+                "统一值班时段","必须修正");
+        assertThat(policy.normalize(review(missingId)).issueDetails()).singleElement()
+                .extracting(ReviewIssue::issueId).isEqualTo("CONTINUITY:ABSOLUTE_TIME:HIGH");
+    }
+
+    @Test void infersObjectLocationForFirstAcquisitionSource() {
+        String evidence="冲突对象：铜钥匙｜冲突属性：首次获得来源｜原状态时间：第一章｜候选状态时间：当前章节｜"
+                +"同一时点：“是”｜推进授权：“无”｜候选原文：“在旧船舱首次发现”｜"
+                +"已确认依据：“信里只有一枚铜钥匙”";
+        ReviewIssue missingId=new ReviewIssue("当前段落","铜钥匙的首次获得来源互斥",evidence,
+                "统一首次获得来源","必须修正");
+        assertThat(policy.normalize(review(missingId)).issueDetails()).singleElement()
+                .extracting(ReviewIssue::issueId).isEqualTo("CONTINUITY:OBJECT_LOCATION:HIGH");
+    }
+
     @Test void keepsAtMostTwoHighConfidenceFindings() {
         ReviewIssue first=issue("CONTINUITY:IDENTITY:HIGH","人物身份互斥","统一身份");
         ReviewIssue second=issue("CONTINUITY:RELATION:HIGH","人物关系互斥","统一关系");
@@ -56,6 +85,15 @@ class ContinuityReviewPolicyTest {
         ReviewIssue issue=new ReviewIssue("CONTINUITY:OBJECT_LOCATION:HIGH","当前内容","钥匙位置互斥",
                 evidence,"统一钥匙发现位置","作者决定");
         assertThat(policy.normalize(review(issue)).issueDetails()).containsExactly(issue);
+    }
+
+    @Test void dropsObjectExclusivityInventedByTheReviewer() {
+        String evidence="冲突对象：铜钥匙｜冲突属性：开启地点｜原状态时间：第三章｜候选状态时间：当前章节｜"
+                +"同一时点：“是”｜推进授权：“无”｜候选原文：“曾用它核对塔底暗门的锁孔”｜"
+                +"已确认依据：“后来用铜钥匙打开维护间”";
+        ReviewIssue issue=new ReviewIssue("CONTINUITY:OBJECT_LOCATION:HIGH","当前内容",
+                "候选把铜钥匙的唯一开启对象写成塔底暗门",evidence,"改成维护间","必须修正");
+        assertThat(policy.normalize(review(issue)).issueDetails()).isEmpty();
     }
 
     private ReviewIssue issue(String id,String problem,String suggestion) {

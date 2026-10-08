@@ -28,7 +28,8 @@ public class PlotForeshadowShadowService {
     public void run(String novelId,String taskId,String sourceSnapshotId,String artifactId,String versionId,
                     ModelGateway.Request request,ModelGateway.Generated candidate,List<String> upstreamAgentRunIds) {
         if (!enabled || candidate==null) return;
-        runner.run(SPEC,novelId,taskId,sourceSnapshotId,artifactId,versionId,upstreamAgentRunIds,request,candidate,
-                ()->agents.plotForeshadowReview(request,candidate));
+        ModelGateway.Request isolated=agents.contextFor(request,AgentRole.PLOT_FORESHADOW_AUDITOR);
+        runner.run(SPEC,novelId,taskId,sourceSnapshotId,artifactId,versionId,upstreamAgentRunIds,isolated,candidate,
+                ()->agents.plotForeshadowReview(isolated,candidate));
     }
 }

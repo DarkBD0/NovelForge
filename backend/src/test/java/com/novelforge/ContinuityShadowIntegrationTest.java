@@ -1,6 +1,7 @@
 package com.novelforge;
 
 import com.novelforge.generation.AgentRole;
+import com.novelforge.generation.AgentContextPolicy;
 import com.novelforge.generation.ContinuityShadowService;
 import com.novelforge.generation.ModelGateway;
 import com.novelforge.generation.SourceSnapshotFactory;
@@ -39,6 +40,9 @@ class ContinuityShadowIntegrationTest {
         when(model.ready()).thenReturn(true);
         when(model.mode()).thenReturn("http");
         when(model.review(any(),any())).thenReturn(new Review(true,List.of(),false,false,false,List.of()));
+        when(model.extractState(any(),any())).thenReturn(new ModelGateway.StateExtraction(List.of(
+                new ModelGateway.ExtractedState("event_enter_room","EVENT","人物进入房间","ACTIVE",
+                        List.of("他推门进入房间。")))));
     }
 
     @Test void persistsIndependentReportWithoutBlockingConfirmationOrRunningTwice() {
@@ -68,12 +72,15 @@ class ContinuityShadowIntegrationTest {
             assertThat(savedIssue.suggestion()).contains("专业检查已将其降为作者决定");
         });
         assertThat(shadow.policyVersion).isEqualTo(ContinuityShadowService.POLICY_VERSION);
-        assertThat(saved.agentRuns).hasSize(2);
+        assertThat(saved.agentRuns).hasSize(3);
         assertThat(saved.agentRuns).anySatisfy(run->{
             assertThat(run.role).isEqualTo(AgentRole.CONTINUITY_AUDITOR.name());
             assertThat(run.operation).isEqualTo("shadow-continuity-review");
             assertThat(run.inputVersionId).isEqualTo(version.id);
             assertThat(run.status).isEqualTo(AgentRunStatus.SUCCEEDED);
+            assertThat(run.contextPolicyVersion).isEqualTo(AgentContextPolicy.VERSION);
+            assertThat(run.contextHash).hasSize(64);
+            assertThat(run.contextJson).contains("\"role\":\"CONTINUITY_AUDITOR\"");
         });
 
         SourceSnapshot source=saved.sourceSnapshots.stream().filter(item->item.id.equals(task.sourceSnapshotId)).findFirst().orElseThrow();

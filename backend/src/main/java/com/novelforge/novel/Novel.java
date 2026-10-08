@@ -29,6 +29,11 @@ public class Novel {
     public List<ProfessionalReviewReplayBatch> professionalReviewReplays = new ArrayList<>();
     /** One parent-task workspace for each outline multi-agent pipeline run. */
     public List<OutlinePipelineWorkspace> outlinePipelines = new ArrayList<>();
+    /** Author-facing conversations are persisted locally but never become canon directly. */
+    public List<ConversationSession> conversationSessions = new ArrayList<>();
+    /** Immutable accepted-decision bundles used by formal generation tasks. */
+    public List<ConversationBrief> conversationBriefs = new ArrayList<>();
+    public List<ProjectBriefChange> projectBriefChanges = new ArrayList<>();
     public List<Change> changes = new ArrayList<>();
     public List<Approval> approvals = new ArrayList<>();
     public List<BudgetChange> budgetChanges = new ArrayList<>();
@@ -41,7 +46,16 @@ public class Novel {
     public enum ShadowReviewStatus { RUNNING, SUCCEEDED, FAILED, INTERRUPTED }
     public enum ShadowReviewDecision { USEFUL, PARTLY_USEFUL, NOT_USEFUL }
     public enum ReplayItemStatus { QUEUED, RUNNING, SUCCEEDED, FAILED, INTERRUPTED }
+    public enum StateExtractionStatus { NOT_REQUIRED, PENDING, SUCCEEDED, FAILED }
     public enum OutlinePipelineStatus { RUNNING, NEEDS_INPUT, SUCCEEDED, FAILED, CANCELLED, STALE, INTERRUPTED }
+    public enum ConversationScope { OUTLINE }
+    public enum ConversationTurnStatus { RUNNING, SUCCEEDED, FAILED, INTERRUPTED }
+    public enum ConversationRole { USER, ASSISTANT }
+    public enum DecisionType { MUST_KEEP, MUST_CHANGE, FORBID, PREFERENCE, OPEN_QUESTION, ASSUMPTION }
+    public enum DecisionStatus { PROPOSED, ACCEPTED, REJECTED, WITHDRAWN }
+    public enum ProposalStatus { DRAFT, EXECUTED, STALE }
+    public enum ProjectField { TITLE, SYNOPSIS, REQUIREMENTS, TARGET_WORDS }
+    public enum ProjectUpdateStatus { PROPOSED, ACCEPTED, REJECTED, APPLIED, STALE }
 
     public static class Artifact {
         public String id = uid();
@@ -51,12 +65,16 @@ public class Novel {
         public String approvedVersionId;
         public boolean needsRevision;
         public List<Version> versions = new ArrayList<>();
-        public Version latest() { return versions.isEmpty() ? null : versions.getLast(); }
+        public Version latest() {
+            for (int i=versions.size()-1;i>=0;i--) if (!versions.get(i).dismissed) return versions.get(i);
+            return null;
+        }
         public Version approved() {
             return versions.stream().filter(v -> v.id.equals(approvedVersionId)).findFirst().orElse(null);
         }
         public boolean clean() {
-            return approvedVersionId != null && !needsRevision && latest().id.equals(approvedVersionId);
+            Version latest=latest();
+            return approvedVersionId != null && latest!=null && !needsRevision && latest.id.equals(approvedVersionId);
         }
     }
 
@@ -75,6 +93,8 @@ public class Novel {
         public Review review;
         public long reviewRevision = -1;
         public String reviewPolicyVersion;
+        /** Stable identity of prose plus authoritative inputs; permits safe reuse across state-only revisions. */
+        public String contentReviewFingerprint;
         /** Advisory prose feedback only. It never participates in confirmation gating. */
         public Review styleReview;
         public String styleReviewPolicyVersion;
@@ -85,8 +105,24 @@ public class Novel {
         /** One bounded automatic repair is allowed for each author-triggered outline task. */
         public int outlineAutoRepairRound;
         public List<String> draftIssues = new ArrayList<>();
+        /** New chapter candidates must obtain evidence-backed state deltas from the dedicated extractor. */
+        public boolean stateExtractionRequired;
+        public StateExtractionStatus stateExtractionStatus = StateExtractionStatus.NOT_REQUIRED;
+        public String stateExtractionPolicyVersion;
+        public String stateExtractionSourceHash;
+        public String stateExtractionAgentRunId;
+        public String stateExtractionError;
+        public List<StateEvidence> stateEvidence = new ArrayList<>();
+        /** Candidate entity identities extracted from this chapter; formal only after author confirmation. */
+        public List<StateEntity> stateEntities = new ArrayList<>();
+        /** Candidate directed relationships extracted from this chapter; formal only after author confirmation. */
+        public List<StateRelation> stateRelations = new ArrayList<>();
         public long basedOnRevision;
         public List<String> sourceVersionIds = new ArrayList<>();
+        public boolean previousNeedsRevision;
+        /** Rejected candidates remain in history but no longer participate in workflow state. */
+        public boolean dismissed;
+        public String dismissedAt;
         public String createdAt = now();
     }
 
@@ -116,6 +152,15 @@ public class Novel {
         }
     }
     public record Fact(String key, String type, String detail, String state) {}
+    public record StateEntity(String key,String type,String name,List<String> aliases,String description) {
+        public StateEntity { aliases=aliases==null?List.of():List.copyOf(aliases); }
+    }
+    public record StateRelation(String key,String fromEntityKey,String type,String toEntityKey,String detail,String state) {}
+    public record StateEvidence(String key,List<String> evidenceQuotes) {
+        public StateEvidence {
+            evidenceQuotes=evidenceQuotes==null?List.of():List.copyOf(evidenceQuotes);
+        }
+    }
     public record ReviewIssue(String issueId, String location, String problem, String evidence, String suggestion, String severity) {
         public ReviewIssue(String location, String problem, String evidence, String suggestion, String severity) {
             this(null,location,problem,evidence,suggestion,severity);
@@ -157,9 +202,14 @@ public class Novel {
         public int automationRound;
         public long inputRevision;
         public String sourceSnapshotId;
+        public String conversationBriefId;
+        public String conversationBriefHash;
+        public List<String> acceptedDecisionIds = new ArrayList<>();
         public List<String> sourceVersionIds = new ArrayList<>();
         public List<String> agentRunIds = new ArrayList<>();
         public TaskStatus status = TaskStatus.QUEUED;
+        /** User-facing phase; it never controls workflow permissions. */
+        public String progressStage = "QUEUED";
         public String resultArtifactId;
         public String resultVersionId;
         public long stagedRevision = -1;
@@ -175,6 +225,9 @@ public class Novel {
         public String artifactId;
         public String contextJson;
         public String contextHash;
+        public String conversationBriefId;
+        public String conversationBriefHash;
+        public List<String> acceptedDecisionIds = new ArrayList<>();
         public List<String> sourceVersionIds = new ArrayList<>();
         public int chapterNumber;
         public int batchNumber;
@@ -187,6 +240,13 @@ public class Novel {
         public String role;
         public String operation;
         public String inputVersionId;
+        /** Exact least-privilege context presented to this role. */
+        public String contextPolicyVersion;
+        public String contextHash;
+        public String contextJson;
+        public List<String> contextSourceVersionIds = new ArrayList<>();
+        public int contextChapterNumber;
+        public int contextBatchNumber;
         public List<String> upstreamAgentRunIds = new ArrayList<>();
         public AgentRunStatus status = AgentRunStatus.RUNNING;
         public String resultArtifactId;
@@ -233,6 +293,105 @@ public class Novel {
         public String createdAt = now();
         public String finishedAt;
     }
+    public static class ConversationSession {
+        public String id = uid();
+        /** Logical chat thread. Several version-bound sessions may belong to the same thread. */
+        public String threadId;
+        public String threadTitle = "新对话";
+        /** Previous version-bound session in the same logical thread, if this session was rebased. */
+        public String previousSessionId;
+        public ConversationScope scope = ConversationScope.OUTLINE;
+        public String targetArtifactId;
+        public String baseVersionId;
+        public long baseRevision;
+        public List<ConversationMessage> messages = new ArrayList<>();
+        /** Durable request state so a refresh can recover an in-flight or failed dialogue turn. */
+        public List<ConversationTurn> turns = new ArrayList<>();
+        public List<ConversationDecision> decisions = new ArrayList<>();
+        public List<ActionProposal> proposals = new ArrayList<>();
+        public List<ProjectUpdateProposal> projectUpdates = new ArrayList<>();
+        public String createdAt = now();
+        public String updatedAt = now();
+    }
+    public static class ConversationMessage {
+        public String id = uid();
+        public ConversationRole role;
+        public String content;
+        public String createdAt = now();
+    }
+    public static class ConversationTurn {
+        public String id = uid();
+        public String requestKey;
+        public String userMessageId;
+        public String assistantMessageId;
+        public ConversationTurnStatus status = ConversationTurnStatus.RUNNING;
+        public String stage = "UNDERSTANDING";
+        public int attempt = 1;
+        public String error;
+        public String startedAt = now();
+        public String finishedAt;
+    }
+    public static class ConversationDecision {
+        public String id = uid();
+        public String sourceMessageId;
+        public DecisionType type;
+        public DecisionStatus status = DecisionStatus.PROPOSED;
+        public String text;
+        public String decidedAt;
+        public String createdAt = now();
+    }
+    public static class ActionProposal {
+        public String id = uid();
+        public String sourceMessageId;
+        public String operation = "GENERATE_OR_REVISE_OUTLINE";
+        public String instructions = "";
+        public long baseRevision;
+        public String baseVersionId;
+        public ProposalStatus status = ProposalStatus.DRAFT;
+        public String conversationBriefId;
+        public String taskId;
+        /** Bounded tool execution explicitly requested in the source user message. */
+        public boolean automaticExecution;
+        public String requestedByUserMessageId;
+        public String executionError;
+        public String createdAt = now();
+        public String executedAt;
+    }
+    public static class ConversationBrief {
+        public String id = uid();
+        public String sessionId;
+        public ConversationScope scope = ConversationScope.OUTLINE;
+        public String targetArtifactId;
+        public String baseVersionId;
+        public long baseRevision;
+        public List<String> acceptedDecisionIds = new ArrayList<>();
+        public List<String> acceptedDecisions = new ArrayList<>();
+        public String hash;
+        public String createdAt = now();
+    }
+    public static class ProjectUpdateProposal {
+        public String id = uid();
+        public String sourceMessageId;
+        public ProjectField field;
+        public String previousValue;
+        public String proposedValue;
+        public String reason = "";
+        public long baseRevision;
+        public ProjectUpdateStatus status = ProjectUpdateStatus.PROPOSED;
+        public String decidedAt;
+        public String appliedAt;
+        public String createdAt = now();
+    }
+    public static class ProjectBriefChange {
+        public String id = uid();
+        public String source = "CONVERSATION";
+        public String conversationSessionId;
+        public long previousRevision;
+        public long newRevision;
+        public List<ProjectFieldChange> fields = new ArrayList<>();
+        public String createdAt = now();
+    }
+    public record ProjectFieldChange(ProjectField field,String previousValue,String newValue) {}
     /** Experimental checker output. It is persisted for comparison but never gates confirmation. */
     public static class ShadowReview {
         public String id = uid();
@@ -262,6 +421,7 @@ public class Novel {
         public String policyVersion;
         /** Optional checker filter; null means the fixed sample across all professional checkers. */
         public String checker;
+        public int sampleLimit;
         public ShadowReviewStatus status = ShadowReviewStatus.RUNNING;
         public List<ProfessionalReviewReplayItem> items = new ArrayList<>();
         public String createdAt = now();
@@ -274,6 +434,10 @@ public class Novel {
         public String artifactId;
         public String versionId;
         public String sourceSnapshotId;
+        public int baselineContextChars;
+        public int roleContextChars;
+        public String roleContextHash;
+        public String contextPolicyVersion;
         public ReplayItemStatus status = ReplayItemStatus.QUEUED;
         /** Unfiltered model output retained only for controlled replay diagnosis. */
         public Review rawReview;

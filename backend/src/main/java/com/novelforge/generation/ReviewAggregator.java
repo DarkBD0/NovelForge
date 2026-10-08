@@ -61,7 +61,10 @@ public class ReviewAggregator {
         }
         review=outlineBudget.apply(novel,target,action,candidate,review);
         review=ignoreEmptyFactFindingForPlan(target,action,candidate,review);
-        review=factAtomicity.apply(candidate,review);
+        // Chapter facts are internal state, not novel prose. They are normalized by
+        // StateExtractionPolicy after the prose review succeeds, so a formatting
+        // defect in generated state must never send otherwise unchanged prose back
+        // through the content-revision loop.
         review=proseBoundary.apply(target,action,candidate,review);
         review=rollingPlanState.apply(novel,target,action,instructions,candidate,review);
         review=reviewPolicy.normalize(validate(review),candidate,previous);

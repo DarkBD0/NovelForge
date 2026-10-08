@@ -9,6 +9,17 @@ import com.novelforge.novel.Novel.AgentRunStatus;
 import com.novelforge.novel.Novel.SourceSnapshot;
 import com.novelforge.novel.Novel.Kind;
 import com.novelforge.novel.Novel.Version;
+import com.novelforge.novel.Novel.ConversationSession;
+import com.novelforge.novel.Novel.ConversationMessage;
+import com.novelforge.novel.Novel.ConversationRole;
+import com.novelforge.novel.Novel.ConversationDecision;
+import com.novelforge.novel.Novel.DecisionType;
+import com.novelforge.novel.Novel.DecisionStatus;
+import com.novelforge.novel.Novel.ProjectBriefChange;
+import com.novelforge.novel.Novel.ProjectField;
+import com.novelforge.novel.Novel.ProjectFieldChange;
+import com.novelforge.novel.Novel.ProjectUpdateProposal;
+import com.novelforge.novel.Novel.ProjectUpdateStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -53,6 +64,20 @@ class FilePersistenceTest {
         AgentRun run=new AgentRun();run.taskId="task-1";run.sourceSnapshotId=snapshot.id;
         run.role="CHAPTER_WRITER";run.operation="generate";run.status=AgentRunStatus.SUCCEEDED;
         run.resultVersionId=version.id;n.agentRuns.add(run);
+        ConversationSession conversation=new ConversationSession();conversation.baseRevision=3;
+        conversation.threadId="outline-thread-1";conversation.threadTitle="雨夜主线讨论";
+        ConversationMessage message=new ConversationMessage();message.role=ConversationRole.USER;message.content="重启后仍应保留的讨论";
+        ConversationDecision decision=new ConversationDecision();decision.sourceMessageId=message.id;
+        decision.type=DecisionType.MUST_KEEP;decision.status=DecisionStatus.ACCEPTED;decision.text="保留雨夜线索";
+        ProjectUpdateProposal update=new ProjectUpdateProposal();update.sourceMessageId=message.id;
+        update.field=ProjectField.TITLE;update.previousValue="旧书名";update.proposedValue="重启后继续的故事";
+        update.status=ProjectUpdateStatus.APPLIED;update.baseRevision=2;
+        conversation.messages.add(message);conversation.decisions.add(decision);conversation.projectUpdates.add(update);
+        n.conversationSessions.add(conversation);
+        ProjectBriefChange briefChange=new ProjectBriefChange();briefChange.conversationSessionId=conversation.id;
+        briefChange.previousRevision=2;briefChange.newRevision=3;
+        briefChange.fields.add(new ProjectFieldChange(ProjectField.TITLE,"旧书名","重启后继续的故事"));
+        n.projectBriefChanges.add(briefChange);
         repo.insert(n);
         jdbc.execute("SHUTDOWN");
         var second=new DriverManagerDataSource(url,"sa","");
@@ -69,6 +94,26 @@ class FilePersistenceTest {
             assertThat(saved.sourceSnapshotId).isEqualTo(snapshot.id);
             assertThat(saved.status).isEqualTo(AgentRunStatus.SUCCEEDED);
             assertThat(saved.resultVersionId).isEqualTo(version.id);
+        });
+        assertThat(restored.conversationSessions).singleElement().satisfies(saved->{
+            assertThat(saved.threadId).isEqualTo("outline-thread-1");
+            assertThat(saved.threadTitle).isEqualTo("雨夜主线讨论");
+            assertThat(saved.messages).singleElement().extracting(item->item.content).isEqualTo("重启后仍应保留的讨论");
+            assertThat(saved.decisions).singleElement().satisfies(item->{
+                assertThat(item.status).isEqualTo(DecisionStatus.ACCEPTED);
+                assertThat(item.text).isEqualTo("保留雨夜线索");
+            });
+            assertThat(saved.projectUpdates).singleElement().satisfies(item->{
+                assertThat(item.field).isEqualTo(ProjectField.TITLE);
+                assertThat(item.status).isEqualTo(ProjectUpdateStatus.APPLIED);
+                assertThat(item.proposedValue).isEqualTo("重启后继续的故事");
+            });
+        });
+        assertThat(restored.projectBriefChanges).singleElement().satisfies(saved->{
+            assertThat(saved.conversationSessionId).isEqualTo(conversation.id);
+            assertThat(saved.previousRevision).isEqualTo(2);
+            assertThat(saved.newRevision).isEqualTo(3);
+            assertThat(saved.fields).singleElement().satisfies(field->assertThat(field.field()).isEqualTo(ProjectField.TITLE));
         });
         new JdbcTemplate(second).execute("SHUTDOWN");
     }

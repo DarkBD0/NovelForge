@@ -38,6 +38,9 @@ class PlotForeshadowShadowIntegrationTest {
         when(model.ready()).thenReturn(true);
         when(model.mode()).thenReturn("http");
         when(model.review(any(),any())).thenReturn(new Review(true,List.of(),false,false,false,List.of()));
+        when(model.extractState(any(),any())).thenReturn(new ModelGateway.StateExtraction(List.of(
+                new ModelGateway.ExtractedState("event_take_evidence","EVENT","人物取得证据后离开仓库","ACTIVE",
+                        List.of("他取得证据后离开仓库。")))));
         when(model.continuityReview(any(),any())).thenReturn(new Review(true,List.of(),false,false,false,List.of()));
         when(model.outlineFoundation(any())).thenReturn(new ModelGateway.Generated("人物与世界参谋材料",
                 "世界规则和人物骨架","参谋摘要",List.of(),null));
@@ -59,6 +62,8 @@ class PlotForeshadowShadowIntegrationTest {
             return tasks.find(saved,submitted.id).status==TaskStatus.SUCCEEDED
                     && saved.shadowReviews.size()==2
                     && saved.shadowReviews.stream().allMatch(item->item.status==ShadowReviewStatus.SUCCEEDED)
+                    && saved.tasks.stream().noneMatch(item->item.status==TaskStatus.QUEUED
+                    || item.status==TaskStatus.RUNNING)
                     && saved.shadowReviews.stream().anyMatch(item->PlotForeshadowShadowService.CHECKER.equals(item.checker)
                     && item.status==ShadowReviewStatus.SUCCEEDED);
         });

@@ -36,6 +36,12 @@ class AutoStylePipelineIntegrationTest {
     @BeforeEach void modelDefaults() {
         when(model.ready()).thenReturn(true);
         when(model.mode()).thenReturn("http");
+        when(model.extractState(any(),any())).thenAnswer(invocation->{
+            ModelGateway.Generated candidate=invocation.getArgument(1);
+            String quote=candidate.content().contains("正文")?"正文":candidate.content().substring(0,Math.min(2,candidate.content().length()));
+            return new ModelGateway.StateExtraction(List.of(new ModelGateway.ExtractedState(
+                    "event_body","EVENT","正文中的核心事件已经发生","ACTIVE",List.of(quote))));
+        });
         when(model.review(any(),any())).thenReturn(new Review(true,List.of(),false,false,false,List.of()));
         when(model.styleReview(any(),any())).thenAnswer(invocation->{
             ModelGateway.Generated candidate=invocation.getArgument(1);
@@ -67,8 +73,11 @@ class AutoStylePipelineIntegrationTest {
         assertThat(latest.reviewPolicyVersion).isEqualTo(ReviewPolicy.VERSION);
         assertThat(latest.styleReview.issueDetails()).isEmpty();
         assertThat(latest.styleReviewPolicyVersion).isEqualTo(StyleReviewPolicy.VERSION);
+        assertThat(latest.stateExtractionStatus).isEqualTo(StateExtractionStatus.SUCCEEDED);
+        assertThat(latest.facts).singleElement().satisfies(fact->assertThat(fact.key()).isEqualTo("event_body"));
         verify(model,times(2)).review(any(),any());
         verify(model,times(2)).styleReview(any(),any());
+        verify(model,times(2)).extractState(any(),any());
     }
 
     @Test void disabledOrLegacySettingDoesNotQueueExtraCalls() {
@@ -82,6 +91,7 @@ class AutoStylePipelineIntegrationTest {
         assertThat(after.tasks).hasSize(1);
         assertThat(after.artifacts.getFirst().versions).hasSize(1);
         verify(model,times(1)).review(any(),any());
+        verify(model,times(1)).extractState(any(),any());
         verify(model,never()).styleReview(any(),any());
     }
 

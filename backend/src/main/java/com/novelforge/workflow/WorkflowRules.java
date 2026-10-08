@@ -25,7 +25,7 @@ public class WorkflowRules {
         return n.artifacts.stream().filter(a -> a.id.equals(id)).findFirst()
                 .orElseThrow(() -> new Problem(404, "内容不属于该小说或不存在"));
     }
-    public Artifact pending(Novel n) { return n.artifacts.stream().filter(a -> !a.clean()).findFirst().orElse(null); }
+    public Artifact pending(Novel n) { return n.artifacts.stream().filter(a -> a.latest()!=null && !a.clean()).findFirst().orElse(null); }
     public int nextChapter(Novel n) {
         return n.artifacts.stream().filter(a -> a.kind == Kind.CHAPTER && a.clean())
                 .mapToInt(a -> a.chapterNumber).max().orElse(0) + 1;

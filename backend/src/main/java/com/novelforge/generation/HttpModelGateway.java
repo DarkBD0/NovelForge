@@ -12,7 +12,7 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import java.io.IOException;
+import java.io.*;
 import java.net.ConnectException;
 import java.net.URI;
 import java.net.http.*;
@@ -21,6 +21,8 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
+import java.util.zip.GZIPInputStream;
 import javax.net.ssl.SSLException;
 
 @Component
@@ -52,6 +54,13 @@ public class HttpModelGateway implements ModelGateway {
     }
     public String mode() { return "http"; }
     public boolean ready() { return !baseUrl.isBlank() && !model.isBlank(); }
+    public DialogueResponse dialogue(DialogueRequest request) {
+        return withStage("创作对话",()->call("prompts/creative-dialogue.txt",request.contextJson(),
+                DialogueResponse.class,false,Math.min(maxTokens,3000),"creative-dialogue"));
+    }
+    @Override public DialogueResponse dialogue(DialogueRequest request,DialogueStream stream) {
+        return withStage("创作对话",()->streamDialogue("prompts/creative-dialogue.txt",request.contextJson(),stream));
+    }
     public Generated generate(Request request) {
         if (request.action()==Action.REWRITE) return withStage("写作生成",()->{
             if (request.target()==null || request.target().latest()==null) throw new Problem(409,"修订目标不存在或没有版本");
@@ -122,6 +131,11 @@ public class HttpModelGateway implements ModelGateway {
     public Review plotForeshadowReview(Request request, Generated candidate) {
         return withStage("情节与伏笔影子检查", () -> call("prompts/plot-foreshadow-reviewer.txt", input(request, candidate, true),
                 Review.class, false, Math.min(maxTokens,6000), "plot-foreshadow-shadow-review"));
+    }
+
+    @Override public StateExtraction extractState(Request request,Generated candidate) {
+        return withStage("提取章节状态",()->call("prompts/state-extractor.txt",input(request,candidate,true),
+                StateExtraction.class,false,Math.min(maxTokens,5000),"state-extraction"));
     }
 
     private String chapterAuditInput(Request request, Generated candidate) {
@@ -299,6 +313,202 @@ public class HttpModelGateway implements ModelGateway {
             throw diagnosed(new Problem(500,"[MODEL_INTERNAL] 本地模型适配发生内部异常，请按诊断编号查看日志"),trace,e);
         }
     }
+
+    private DialogueResponse streamDialogue(String prompt,String input,DialogueStream stream) {
+        if (!ready()) throw new Problem(503,"请配置模型地址 NOVELFORGE_MODEL_BASE_URL 和模型名 NOVELFORGE_MODEL_NAME");
+        var trace=new Trace("creative-dialogue-stream");
+        AtomicReference<CompletableFuture<HttpResponse<InputStream>>> pending=new AtomicReference<>();
+        AtomicReference<InputStream> responseBody=new AtomicReference<>();
+        stream.onCancel(()->{
+            CompletableFuture<?> request=pending.get(); if (request!=null) request.cancel(true);
+            InputStream body=responseBody.get(); if (body!=null) try { body.close(); } catch (IOException ignored) {}
+        });
+        try {
+            if (timeout<1||maxTokens<1) throw new Problem(503,"[MODEL_CONFIG] 模型超时和输出额度必须大于零");
+            URI uri=URI.create(baseUrl.replaceAll("/+$","")+"/chat/completions");
+            if (uri.getHost()==null) throw new Problem(503,"[MODEL_CONFIG] 模型基础地址无效，必须包含协议和主机名");
+            boolean loopback=Set.of("127.0.0.1","localhost","[::1]").contains(uri.getHost());
+            if (!"https".equals(uri.getScheme())&&!("http".equals(uri.getScheme())&&loopback))
+                throw new Problem(503,"远程模型地址必须使用 HTTPS；仅本机模型允许 HTTP");
+            if (uri.getUserInfo()!=null||uri.getQuery()!=null||uri.getFragment()!=null)
+                throw new Problem(503,"模型基础地址不能包含凭据、查询参数或片段");
+            trace.phase="REQUEST_ENCODING";
+            String system=new ClassPathResource(prompt).getContentAsString(StandardCharsets.UTF_8);
+            var body=new LinkedHashMap<String,Object>();
+            body.put("model",model); body.put("stream",true);
+            body.put("messages",List.of(Map.of("role","system","content",system),Map.of("role","user","content",input)));
+            if (deepSeek) body.put("thinking",Map.of("type","disabled"));
+            if (!List.of("max_tokens","max_completion_tokens").contains(tokenField))
+                throw new Problem(503,"不支持的模型 token 上限字段");
+            body.put(tokenField,Math.min(maxTokens,3000));
+            if (!Set.of("none","json_object").contains(responseFormat))
+                throw new Problem(503,"NOVELFORGE_RESPONSE_FORMAT 仅支持 none 或 json_object");
+            if (responseFormat.equals("json_object")) body.put("response_format",Map.of("type","json_object"));
+            HttpRequest.Builder builder=HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(timeout))
+                    .header("Content-Type","application/json").header("Accept","text/event-stream, application/json")
+                    .header("Accept-Encoding","identity")
+                    .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body)));
+            if (!apiKey.isBlank()) builder.header("Authorization","Bearer "+apiKey);
+            if (stream.cancelled()) throw new Problem(409,"[CANCELLED] 本次对话已停止");
+            trace.phase="HTTP_REQUEST"; stream.stage("CONNECTING");
+            CompletableFuture<HttpResponse<InputStream>> future=client.sendAsync(builder.build(),HttpResponse.BodyHandlers.ofInputStream());
+            pending.set(future);
+            if (stream.cancelled()) { future.cancel(true); throw new Problem(409,"[CANCELLED] 本次对话已停止"); }
+            HttpResponse<InputStream> response=future.get(timeout,TimeUnit.SECONDS);
+            responseBody.set(response.body()); trace.headers(response);
+            if (response.statusCode()!=200) { response.body().close(); throw httpFailure(response.statusCode()); }
+            if (stream.cancelled()) throw new Problem(409,"[CANCELLED] 本次对话已停止");
+            trace.phase="HTTP_RESPONSE"; stream.stage("GENERATING");
+            String encoding=response.headers().firstValue("Content-Encoding").orElse("");
+            InputStream decodedBody=response.body();
+            if ("gzip".equalsIgnoreCase(encoding)) decodedBody=new GZIPInputStream(decodedBody);
+            else if (!encoding.isBlank()&&!"identity".equalsIgnoreCase(encoding))
+                throw new Problem(502,"[RESPONSE_ENCODING] 模型返回不支持的 HTTP 压缩编码");
+            String media=response.headers().firstValue("Content-Type").orElse("").toLowerCase(Locale.ROOT);
+            String finalContent;
+            if (media.contains("text/event-stream")) {
+                DialogueSseState state=readDialogueStream(decodedBody,stream);
+                trace.bytes=(int)state.bytes; trace.reasoning=state.reasoning;
+                trace.outputTokens=state.outputTokens; trace.reasoningTokens=state.reasoningTokens;
+                if (!"stop".equals(state.finish)) {
+                    if ("length".equals(state.finish)) throw new Problem(502,"[OUTPUT_TRUNCATED] 模型输出被截断，请调整输出额度后重试");
+                    throw new Problem(502,"[FINISH_REASON] 模型未返回正常结束标志 stop，请检查接口兼容性");
+                }
+                finalContent=state.content.toString();
+            } else {
+                byte[] bytes=decodedBody.readNBytes(BoundedModelBody.LIMIT+1);
+                if (bytes.length>BoundedModelBody.LIMIT) throw new Problem(502,"[RESPONSE_TOO_LARGE] 模型响应超过 4MB 限制");
+                trace.bytes=bytes.length;
+                var decoded=responseDecoder.decode(bytes,media,"");
+                JsonNode choice=decoded.choice();
+                trace.reasoning=decoded.reasoningPresent(); trace.outputTokens=decoded.outputTokens(); trace.reasoningTokens=decoded.reasoningTokens();
+                String finish=choice.path("finish_reason").asText();
+                if ("length".equals(finish)) throw new Problem(502,"[OUTPUT_TRUNCATED] 模型输出被截断，请调整输出额度后重试");
+                if (!"stop".equals(finish)) throw new Problem(502,"[FINISH_REASON] 模型未返回正常结束标志 stop，请检查接口兼容性");
+                finalContent=responseText(choice.path("message").path("content"));
+                DialogueResponse preview=outputReader.read(finalContent,DialogueResponse.class);
+                if (preview.reply()!=null&&!preview.reply().isBlank()) stream.text(preview.reply());
+            }
+            if (stream.cancelled()) throw new Problem(409,"[CANCELLED] 本次对话已停止");
+            if (finalContent.isBlank()) throw emptyFinal(new ModelResponseDecoder.Decoded(mapper.createObjectNode(),trace.reasoning,trace.outputTokens,trace.reasoningTokens),false);
+            trace.phase="MODEL_JSON"; stream.stage("FINALIZING");
+            return outputReader.read(finalContent,DialogueResponse.class);
+        } catch (Problem p) { throw diagnosed(p,trace,null); }
+        catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw diagnosed(new Problem(409,"[CANCELLED] 本次对话已停止"),trace,error);
+        } catch (CancellationException error) {
+            throw diagnosed(new Problem(409,"[CANCELLED] 本次对话已停止"),trace,error);
+        } catch (TimeoutException error) {
+            CompletableFuture<?> request=pending.get(); if (request!=null) request.cancel(true);
+            throw diagnosed(new Problem(502,"[MODEL_TIMEOUT] 模型请求超时（包括读取完整响应）"),trace,error);
+        } catch (ExecutionException error) {
+            if (stream.cancelled()) throw diagnosed(new Problem(409,"[CANCELLED] 本次对话已停止"),trace,error);
+            throw diagnosed(transportFailure(error),trace,error.getCause());
+        } catch (IOException error) {
+            if (stream.cancelled()) throw diagnosed(new Problem(409,"[CANCELLED] 本次对话已停止"),trace,error);
+            throw diagnosed(new Problem(502,"[MODEL_IO] 模型流式响应读取中断"),trace,error);
+        } catch (IllegalArgumentException error) {
+            throw diagnosed(new Problem(503,"[MODEL_CONFIG] 本地模型配置或请求参数无效"),trace,error);
+        } catch (Exception error) {
+            throw diagnosed(new Problem(500,"[MODEL_INTERNAL] 流式对话适配发生内部异常"),trace,error);
+        } finally {
+            InputStream body=responseBody.get(); if (body!=null) try { body.close(); } catch (IOException ignored) {}
+        }
+    }
+
+    private DialogueSseState readDialogueStream(InputStream input,DialogueStream stream) throws IOException {
+        DialogueSseState state=new DialogueSseState();
+        StringBuilder event=new StringBuilder();
+        try (BufferedReader reader=new BufferedReader(new InputStreamReader(input,StandardCharsets.UTF_8))) {
+            String line;
+            while ((line=reader.readLine())!=null) {
+                state.bytes+=line.getBytes(StandardCharsets.UTF_8).length+1;
+                if (state.bytes>BoundedModelBody.LIMIT) throw new Problem(502,"[RESPONSE_TOO_LARGE] 模型流式响应超过 4MB 限制");
+                if (stream.cancelled()) throw new Problem(409,"[CANCELLED] 本次对话已停止");
+                if (line.isEmpty()) {
+                    if (!event.isEmpty()) { consumeDialogueEvent(event.toString(),state,stream); event.setLength(0); }
+                } else if (line.startsWith("data:")) {
+                    if (!event.isEmpty()) event.append('\n');
+                    String value=line.substring(5); event.append(value.startsWith(" ")?value.substring(1):value);
+                } else if (!(line.startsWith(":")||line.startsWith("event:")||line.startsWith("id:")||line.startsWith("retry:"))) {
+                    throw new Problem(502,"[SSE_INVALID] 模型流式响应包含无法识别的事件行");
+                }
+            }
+        }
+        if (!event.isEmpty()) consumeDialogueEvent(event.toString(),state,stream);
+        if (!state.done||state.finish==null) throw new Problem(502,"[SSE_INCOMPLETE] 模型流式响应未完整结束，不保存部分内容");
+        return state;
+    }
+
+    private void consumeDialogueEvent(String event,DialogueSseState state,DialogueStream stream) {
+        if (state.done) throw new Problem(502,"[SSE_INVALID] 模型流式响应结束后仍返回数据");
+        if (event.equals("[DONE]")) { state.done=true; return; }
+        JsonNode node;
+        try { node=mapper.readTree(event); }
+        catch (Exception error) { throw new Problem(502,"[SSE_INVALID] 模型流式事件不是有效 JSON"); }
+        JsonNode usage=node.path("usage");
+        if (usage.isObject()) {
+            state.outputTokens=usage.has("completion_tokens")?usage.path("completion_tokens").asLong(-1):usage.path("output_tokens").asLong(-1);
+            JsonNode details=usage.has("completion_tokens_details")?usage.path("completion_tokens_details"):usage.path("output_tokens_details");
+            state.reasoningTokens=details.path("reasoning_tokens").asLong(-1);
+        }
+        JsonNode choices=node.path("choices");
+        if (choices.isArray()&&choices.isEmpty()&&usage.isObject()) return;
+        if (!choices.isArray()||choices.size()!=1||!choices.get(0).isObject())
+            throw new Problem(502,"[SSE_INVALID] 模型流式响应须有唯一 choices[0]");
+        JsonNode choice=choices.get(0),delta=choice.path("delta");
+        if (!delta.isObject()) throw new Problem(502,"[SSE_INVALID] 模型流式响应缺少 delta");
+        if (delta.hasNonNull("refusal")&&!delta.path("refusal").asText().isBlank())
+            throw new Problem(502,"[MODEL_REFUSAL] 模型拒绝了本次对话");
+        if (delta.hasNonNull("tool_calls")||delta.hasNonNull("function_call"))
+            throw new Problem(502,"[UNEXPECTED_TOOL_CALL] 创作对话未开放工具调用");
+        if (delta.hasNonNull("reasoning_content")) state.reasoning|=!delta.path("reasoning_content").asText().isBlank();
+        if (delta.hasNonNull("content")) {
+            if (!delta.path("content").isTextual()) throw new Problem(502,"[SSE_INVALID] delta.content 必须是文本");
+            state.content.append(delta.path("content").textValue());
+            String preview=partialReply(state.content);
+            if (preview.length()>state.emittedReplyLength) {
+                stream.text(preview.substring(state.emittedReplyLength));
+                state.emittedReplyLength=preview.length();
+            }
+        }
+        if (choice.hasNonNull("finish_reason")) state.finish=choice.path("finish_reason").asText();
+    }
+
+    private static final Pattern REPLY_FIELD=Pattern.compile("\\\"reply\\\"\\s*:\\s*\\\"");
+    private String partialReply(CharSequence json) {
+        var matcher=REPLY_FIELD.matcher(json);
+        if (!matcher.find()) return "";
+        StringBuilder value=new StringBuilder();
+        for (int index=matcher.end();index<json.length();index++) {
+            char current=json.charAt(index);
+            if (current=='\"') break;
+            if (current!='\\') { value.append(current); continue; }
+            if (++index>=json.length()) break;
+            char escaped=json.charAt(index);
+            switch (escaped) {
+                case '\"','\\','/' -> value.append(escaped);
+                case 'b' -> value.append('\b'); case 'f' -> value.append('\f');
+                case 'n' -> value.append('\n'); case 'r' -> value.append('\r'); case 't' -> value.append('\t');
+                case 'u' -> {
+                    if (index+4>=json.length()) return value.toString();
+                    String hex=json.subSequence(index+1,index+5).toString();
+                    try { value.append((char)Integer.parseInt(hex,16)); }
+                    catch (NumberFormatException error) { return value.toString(); }
+                    index+=4;
+                }
+                default -> { return value.toString(); }
+            }
+        }
+        return value.toString();
+    }
+
+    private static class DialogueSseState {
+        final StringBuilder content=new StringBuilder();
+        String finish; boolean done,reasoning; long bytes,outputTokens=-1,reasoningTokens=-1;
+        int emittedReplyLength;
+    }
     private Problem transportFailure(Throwable error) {
         for (Throwable cause=error; cause!=null; cause=cause.getCause()) {
             if (cause instanceof BoundedModelBody.BodyTooLarge) return new Problem(502,"[RESPONSE_TOO_LARGE] 模型响应超过 4MB 限制");
@@ -347,6 +557,12 @@ public class HttpModelGateway implements ModelGateway {
             if (info==null) return;
             status=info.statusCode();
             String type=info.headers().firstValue("Content-Type").orElse("").toLowerCase(Locale.ROOT);
+            media=type.contains("application/json") ? "JSON" : type.contains("text/event-stream") ? "SSE" : type.contains("text/html") ? "HTML" : "other";
+        }
+        void headers(HttpResponse<?> response) {
+            if (response==null) return;
+            status=response.statusCode();
+            String type=response.headers().firstValue("Content-Type").orElse("").toLowerCase(Locale.ROOT);
             media=type.contains("application/json") ? "JSON" : type.contains("text/event-stream") ? "SSE" : type.contains("text/html") ? "HTML" : "other";
         }
     }

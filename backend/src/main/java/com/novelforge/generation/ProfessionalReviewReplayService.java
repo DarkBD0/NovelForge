@@ -51,20 +51,25 @@ public class ProfessionalReviewReplayService {
     }
 
     public ProfessionalReviewReplayBatch start(String novelId,String requestKey) {
-        return start(novelId,requestKey,null);
+        return start(novelId,requestKey,null,20);
     }
 
     public ProfessionalReviewReplayBatch start(String novelId,String requestKey,String checker) {
+        return start(novelId,requestKey,checker,20);
+    }
+
+    public ProfessionalReviewReplayBatch start(String novelId,String requestKey,String checker,int sampleLimit) {
         require(requestKey!=null && !requestKey.isBlank() && requestKey.length()<=100,
                 "对照重放需要不超过100字符的幂等键");
         require(checker==null || List.of(ContinuityShadowService.CHECKER,PlotForeshadowShadowService.CHECKER).contains(checker),
                 "专业检查器只能选择连续性检查或情节与伏笔检查");
+        require(sampleLimit>=1 && sampleLimit<=20,"专业检查对照样本数必须在 1 到 20 之间");
         require(agents.ready(),"真实模型尚未配置，不能开始专业检查对照重放");
         Novel snapshot=repository.get(novelId);
         List<String> sampleIds=evaluations.summary(snapshot).reports().stream()
                 .filter(ShadowReviewEvaluationService.ReportView::evaluationSample)
                 .filter(report->checker==null || checker.equals(report.checker()))
-                .map(ShadowReviewEvaluationService.ReportView::id).toList();
+                .map(ShadowReviewEvaluationService.ReportView::id).limit(sampleLimit).toList();
         require(!sampleIds.isEmpty(),"当前小说没有可用于对照重放的固定历史样本");
 
         boolean[] created={false};
@@ -77,10 +82,12 @@ public class ProfessionalReviewReplayService {
                         "同一幂等键不能用于不同的专业检查策略");
                 require(java.util.Objects.equals(checker,existing.checker),
                         "同一幂等键不能用于不同的专业检查器");
+                require(existing.sampleLimit==sampleLimit,"同一幂等键不能用于不同的样本数量");
                 return existing;
             }
             ProfessionalReviewReplayBatch added=new ProfessionalReviewReplayBatch();
             added.requestKey=requestKey; added.policyVersion=replayVersion(checker); added.checker=checker;
+            added.sampleLimit=sampleLimit;
             for (String baselineId:sampleIds) added.items.add(prepareItem(novel,baselineId));
             novel.professionalReviewReplays.add(added); created[0]=true; return added;
         });
@@ -149,15 +156,26 @@ public class ProfessionalReviewReplayService {
             ModelGateway.Request request=new ModelGateway.Request(source.action,novel,artifact,context,instructions);
             ModelGateway.Generated candidate=new ModelGateway.Generated(version.title,version.content,version.summary,
                     version.facts,version.plan,version.draftIssues);
+            AgentRole role=ContinuityShadowService.CHECKER.equals(item.checker)
+                    ?AgentRole.CONTINUITY_AUDITOR:AgentRole.PLOT_FORESHADOW_AUDITOR;
+            ModelGateway.Request isolated=agents.contextFor(request,role);
+            repository.update(novelId,current->{
+                ProfessionalReviewReplayItem saved=findItem(findBatch(current,batchId),itemId);
+                saved.baselineContextChars=context.json().length();
+                saved.roleContextChars=isolated.context().json().length();
+                saved.roleContextHash=snapshots.hash(isolated.context().json());
+                saved.contextPolicyVersion=AgentContextPolicy.VERSION;
+                return null;
+            });
             Review raw=switch (item.checker) {
-                case ContinuityShadowService.CHECKER -> agents.continuityReview(request,candidate);
-                case PlotForeshadowShadowService.CHECKER -> agents.plotForeshadowReview(request,candidate);
+                case ContinuityShadowService.CHECKER -> agents.continuityReview(isolated,candidate);
+                case PlotForeshadowShadowService.CHECKER -> agents.plotForeshadowReview(isolated,candidate);
                 default -> throw new Problem(409,"历史样本包含未知的专业检查器");
             };
             repository.update(novelId,current->{
                 findItem(findBatch(current,batchId),itemId).rawReview=raw; return null;
             });
-            Review normalized=policy.normalize(reviews.aggregateShadow(raw,candidate),candidate,request,version.review);
+            Review normalized=policy.normalize(reviews.aggregateShadow(raw,candidate),candidate,isolated,version.review);
             if (ContinuityShadowService.CHECKER.equals(item.checker)) normalized=continuityPolicy.normalize(normalized);
             Review finalReview=normalized;
             repository.update(novelId,current->{
@@ -224,9 +242,9 @@ public class ProfessionalReviewReplayService {
     }
 
     private String replayVersion(String checker) {
-        if (ContinuityShadowService.CHECKER.equals(checker)) return ContinuityReviewPolicy.VERSION;
-        if (PlotForeshadowShadowService.CHECKER.equals(checker)) return PlotForeshadowShadowService.POLICY_VERSION;
-        return ContinuityReviewPolicy.VERSION+"+"+PlotForeshadowShadowService.POLICY_VERSION;
+        if (ContinuityShadowService.CHECKER.equals(checker)) return ContinuityReviewPolicy.VERSION+"+"+AgentContextPolicy.VERSION;
+        if (PlotForeshadowShadowService.CHECKER.equals(checker)) return PlotForeshadowShadowService.POLICY_VERSION+"+"+AgentContextPolicy.VERSION;
+        return ContinuityReviewPolicy.VERSION+"+"+PlotForeshadowShadowService.POLICY_VERSION+"+"+AgentContextPolicy.VERSION;
     }
 
     @PreDestroy public void close() { executor.shutdownNow(); }

@@ -48,6 +48,12 @@ class TaskRecoveryTest {
         assertThat(source.contextHash).hasSize(64);
         assertThat(source.sourceVersionIds).isEqualTo(task.sourceVersionIds);
         assertThat(runs).hasSize(4);
+        assertThat(runs).allSatisfy(run->{
+            assertThat(run.contextPolicyVersion).isEqualTo(AgentContextPolicy.VERSION);
+            assertThat(run.contextHash).hasSize(64);
+            assertThat(run.contextJson).contains("\"role\":\""+run.role+"\"");
+            assertThat(new SourceSnapshotFactory().hash(run.contextJson)).isEqualTo(run.contextHash);
+        });
         AgentRun foundation=runs.stream().filter(run->run.operation.equals("outline-foundation")).findFirst().orElseThrow();
         AgentRun writer=runs.stream().filter(run->run.operation.equals("generate")).findFirst().orElseThrow();
         AgentRun continuity=runs.stream().filter(run->run.operation.equals("outline-continuity-review")).findFirst().orElseThrow();
@@ -55,6 +61,7 @@ class TaskRecoveryTest {
         assertThat(foundation.role).isEqualTo(AgentRole.CHARACTER_WORLD_DESIGNER.name());
         assertThat(foundation.status).isEqualTo(AgentRunStatus.SUCCEEDED);
         assertThat(writer.role).isEqualTo(AgentRole.STORY_ARCHITECT.name());
+        assertThat(writer.contextJson).contains("outlineFoundation").doesNotContain("retrievedConfirmedHistory");
         assertThat(writer.status).isEqualTo(AgentRunStatus.SUCCEEDED);
         assertThat(writer.resultVersionId).isEqualTo(task.resultVersionId);
         assertThat(writer.upstreamAgentRunIds).containsExactly(foundation.id);
@@ -102,6 +109,91 @@ class TaskRecoveryTest {
         Task retry=tasks.retry(n.id,t.id,Novel.uid(),0);
         await().atMost(Duration.ofSeconds(10)).until(()->tasks.find(repository.get(n.id),retry.id).status==TaskStatus.SUCCEEDED);
         assertThat(repository.get(n.id).artifacts).hasSize(1);
+    }
+    @Test void restartPreservesChapterDraftAndTurnsInterruptedStateExtractionIntoRetryableFailure() {
+        Novel n=create();
+        Novel seeded=repository.update(n.id,stored->{
+            Artifact chapter=new Artifact(); chapter.kind=Kind.CHAPTER; chapter.chapterNumber=1;
+            Version version=new Version(); version.title="第一章"; version.content="周宁在码头捡到一枚铜扣。";
+            version.summary="周宁捡到铜扣。";
+            version.review=new Review(true,List.of(),false,false,false,List.of());
+            version.reviewRevision=stored.revision; version.reviewPolicyVersion=ReviewPolicy.VERSION;
+            version.stateExtractionRequired=true; version.stateExtractionStatus=StateExtractionStatus.PENDING;
+            chapter.versions.add(version); stored.artifacts.add(chapter);
+            Task task=new Task(); task.action=Action.REVIEW; task.artifactId=chapter.id;
+            task.automationKind=TaskService.STATE_EXTRACTION_ONLY; task.status=TaskStatus.RUNNING;
+            task.inputRevision=stored.revision; stored.tasks.add(task);
+            AgentRun run=new AgentRun(); run.taskId=task.id; run.role=AgentRole.STATE_EXTRACTOR.name();
+            run.operation="extract-state"; run.inputVersionId=version.id; run.status=AgentRunStatus.RUNNING;
+            stored.agentRuns.add(run); task.agentRunIds.add(run.id); version.stateExtractionAgentRunId=run.id;
+            return stored;
+        });
+        Artifact chapter=seeded.artifacts.getLast(); String content=chapter.latest().content;
+
+        tasks.recover();
+
+        Novel recovered=repository.get(n.id); Version interrupted=recovered.artifacts.getLast().latest();
+        assertThat(interrupted.content).isEqualTo(content);
+        assertThat(interrupted.review.passed()).isTrue();
+        assertThat(interrupted.stateExtractionStatus).isEqualTo(StateExtractionStatus.FAILED);
+        assertThat(interrupted.stateExtractionError).contains("正文草稿和内容检查均已保留","只重试状态提取");
+        assertThat(recovered.tasks.getLast().status).isEqualTo(TaskStatus.INTERRUPTED);
+        assertThat(recovered.agentRuns.getLast().status).isEqualTo(AgentRunStatus.INTERRUPTED);
+
+        doReturn(new ModelGateway.StateExtraction(List.of(
+                new ModelGateway.ExtractedState("event_copper_button","EVENT","周宁捡到一枚铜扣","ACTIVE",
+                        List.of("周宁在码头捡到一枚铜扣。")))))
+                .when(model).extractState(any(),any());
+        Task retry=tasks.submitStateExtraction(n.id,chapter.id,Novel.uid(),recovered.revision);
+        await().atMost(Duration.ofSeconds(10)).until(()->!List.of(TaskStatus.QUEUED,TaskStatus.RUNNING)
+                .contains(tasks.find(repository.get(n.id),retry.id).status));
+        Novel completed=repository.get(n.id);
+        assertThat(tasks.find(completed,retry.id).status).isEqualTo(TaskStatus.SUCCEEDED);
+        assertThat(completed.artifacts.getLast().latest().stateExtractionStatus).isEqualTo(StateExtractionStatus.SUCCEEDED);
+        verify(model,times(1)).extractState(any(),any());
+        verify(model,never()).review(any(),any());
+    }
+    @Test void stateExtractionFailurePreservesCompletedReviewAndAllowsExtractionOnlyRetry() {
+        Novel n=create();
+        Novel seeded=repository.update(n.id,stored->{
+            Artifact chapter=new Artifact(); chapter.kind=Kind.CHAPTER; chapter.chapterNumber=1;
+            Version version=new Version(); version.title="第一章";
+            version.content="周宁在码头捡到一枚铜扣。"; version.summary="周宁捡到铜扣。";
+            version.stateExtractionRequired=true; version.stateExtractionStatus=StateExtractionStatus.PENDING;
+            chapter.versions.add(version); stored.artifacts.add(chapter);
+            return stored;
+        });
+        Artifact chapter=seeded.artifacts.getLast(); String content=chapter.latest().content;
+        when(model.extractState(any(),any())).thenThrow(new IllegalStateException("fixture extraction failure"));
+
+        Task review=tasks.submit(n.id,Action.REVIEW,chapter.id,"",Novel.uid(),seeded.revision);
+        await().atMost(Duration.ofSeconds(10)).until(()->tasks.find(repository.get(n.id),review.id).status==TaskStatus.FAILED);
+
+        Novel failed=repository.get(n.id); Version preserved=failed.artifacts.getLast().latest();
+        assertThat(preserved.content).isEqualTo(content);
+        assertThat(preserved.review).isNotNull();
+        assertThat(preserved.review.passed()).isTrue();
+        assertThat(preserved.reviewRevision).isEqualTo(failed.revision);
+        assertThat(preserved.reviewPolicyVersion).isEqualTo(ReviewPolicy.VERSION);
+        assertThat(preserved.stateExtractionStatus).isEqualTo(StateExtractionStatus.FAILED);
+        assertThat(preserved.stateExtractionError).contains("正文草稿已经保留","只重试状态提取");
+        assertThat(tasks.find(failed,review.id).resultArtifactId).isEqualTo(chapter.id);
+        assertThat(tasks.find(failed,review.id).resultVersionId).isEqualTo(preserved.id);
+
+        doReturn(new ModelGateway.StateExtraction(List.of(
+                new ModelGateway.ExtractedState("event_copper_button","EVENT","周宁捡到一枚铜扣","ACTIVE",
+                        List.of("周宁在码头捡到一枚铜扣。")))))
+                .when(model).extractState(any(),any());
+        Task retry=tasks.submitStateExtraction(n.id,chapter.id,Novel.uid(),failed.revision);
+        await().atMost(Duration.ofSeconds(10)).until(()->tasks.find(repository.get(n.id),retry.id).status==TaskStatus.SUCCEEDED);
+
+        Version completed=repository.get(n.id).artifacts.getLast().latest();
+        assertThat(completed.content).isEqualTo(content);
+        assertThat(completed.review.passed()).isTrue();
+        assertThat(completed.stateExtractionStatus).isEqualTo(StateExtractionStatus.SUCCEEDED);
+        verify(model,times(1)).review(any(),any());
+        verify(model,times(2)).extractState(any(),any());
+        verify(model,never()).generate(any());
     }
     @Test void failedReviewKeepsDraftAndRetryOnlyReviewsIt() {
         when(model.generate(any())).thenReturn(generated());

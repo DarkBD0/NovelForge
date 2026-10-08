@@ -1,0 +1,2 @@
+ALTER TABLE artifact ADD COLUMN IF NOT EXISTS record_hash VARCHAR(64);
+ALTER TABLE artifact_version ADD COLUMN IF NOT EXISTS record_hash VARCHAR(64);

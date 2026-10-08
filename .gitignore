@@ -6,6 +6,9 @@
 dependency-reduced-pom.xml
 hs_err_pid*
 replay_pid*
+*.hprof
+*.jfr
+.attach_pid*
 
 # Runtime data and local persistence
 /data/
@@ -57,6 +60,7 @@ replay_pid*
 *.secret.env
 *.credentials.env
 config/*.local.*
+config/*.env
 config/*secret*
 config/*credential*
 !config/*.example.*

@@ -1,8 +1,11 @@
 package com.novelforge;
 
 import com.novelforge.generation.ContextAssembler;
+import com.novelforge.generation.AgentRole;
 import com.novelforge.generation.ReviewPolicy;
 import com.novelforge.generation.StyleReviewPolicy;
+import com.novelforge.generation.ContentReviewFingerprint;
+import com.novelforge.generation.ModelGateway;
 import com.novelforge.infrastructure.NovelRepository;
 import com.novelforge.novel.Novel;
 import com.novelforge.novel.Novel.*;
@@ -25,6 +28,7 @@ class WorkflowIntegrationTest {
     @Autowired TaskService tasks;
     @Autowired ContextAssembler contexts;
     @Autowired WordCounter words;
+    @Autowired ContentReviewFingerprint contentReviewFingerprints;
 
     Novel create() { return workflow.create("雾港来信", "一名修船师寻找失踪的父亲", 1000, "逻辑自洽，回收伏笔"); }
     Task run(String id, Action action, String target) {
@@ -228,7 +232,7 @@ class WorkflowIntegrationTest {
     @Test void anOldReviewPolicyCannotConfirmButCanBeRecheckedWithoutChangingContent() {
         Novel n=create(); run(n.id,Action.OUTLINE,null);
         Novel current=repository.update(n.id,stored->{
-            stored.artifacts.getFirst().latest().reviewPolicyVersion=null;
+            stored.artifacts.getFirst().latest().reviewPolicyVersion="2026-09-27-v6";
             return stored;
         });
         Artifact outline=current.artifacts.getFirst();
@@ -322,7 +326,10 @@ class WorkflowIntegrationTest {
         assertThat(candidate.source).isEqualTo("SYSTEM");
         assertThat(candidate.review).isNotNull();
         assertThat(candidate.styleReview).isNotNull();
-        assertThat(result.agentRunIds).hasSize(3);
+        assertThat(result.agentRunIds).hasSize(4);
+        assertThat(polished.agentRuns.stream().filter(run->result.agentRunIds.contains(run.id)).map(run->run.role))
+                .contains(AgentRole.STATE_EXTRACTOR.name());
+        assertThat(candidate.stateExtractionStatus).isEqualTo(StateExtractionStatus.SUCCEEDED);
         assertThatThrownBy(()->tasks.submitStylePolish(polished.id,chapter.id,Novel.uid(),polished.revision))
                 .hasMessageContaining("已经自动优化过一次");
     }
@@ -350,6 +357,87 @@ class WorkflowIntegrationTest {
         assertThat(approved.approved().stylePolishRound).isEqualTo(1);
         assertThat(approved.approved().styleReview.issueDetails()).singleElement()
                 .extracting(ReviewIssue::severity).isEqualTo("作者决定");
+    }
+
+    @Test void failedChapterStateCanBeRetriedWithoutRegeneratingOrRecheckingContent() {
+        Novel n=create(); String id=n.id;
+        n=repository.update(id,stored->{
+            Artifact chapter=new Artifact(); chapter.kind=Kind.CHAPTER; chapter.chapterNumber=1;
+            Version version=new Version(); version.title="第一章";
+            version.content="林深在雨夜捡到一把银色钥匙。他把钥匙收进口袋。";
+            version.summary="林深捡到银色钥匙。";
+            version.review=new Review(true,List.of(),false,false,false,List.of());
+            version.reviewRevision=stored.revision; version.reviewPolicyVersion=ReviewPolicy.VERSION;
+            version.stateExtractionRequired=true; version.stateExtractionStatus=StateExtractionStatus.FAILED;
+            version.stateExtractionError="上次状态提取失败";
+            chapter.versions.add(version); stored.artifacts.add(chapter); return stored;
+        });
+        Artifact chapter=n.artifacts.getLast(); Version before=chapter.latest(); Review originalReview=before.review;
+
+        Task task=tasks.submitStateExtraction(id,chapter.id,Novel.uid(),n.revision);
+        await().atMost(Duration.ofSeconds(10)).until(()->!List.of(TaskStatus.QUEUED,TaskStatus.RUNNING)
+                .contains(tasks.find(repository.get(id),task.id).status));
+
+        Novel recovered=repository.get(id); Task result=tasks.find(recovered,task.id);
+        Version after=rules.artifact(recovered,chapter.id).latest();
+        assertThat(result.status).as(result.error).isEqualTo(TaskStatus.SUCCEEDED);
+        assertThat(result.automationKind).isEqualTo(TaskService.STATE_EXTRACTION_ONLY);
+        assertThat(after.id).isEqualTo(before.id);
+        assertThat(after.content).isEqualTo(before.content);
+        assertThat(after.review).isEqualTo(originalReview);
+        assertThat(after.stateExtractionStatus).isEqualTo(StateExtractionStatus.SUCCEEDED);
+        assertThat(after.stateExtractionError).isNull();
+        assertThat(after.facts).singleElement().extracting(Fact::detail)
+                .isEqualTo("林深在雨夜捡到一把银色钥匙");
+        assertThat(after.stateEntities).extracting(StateEntity::key)
+                .containsExactly("character_lin_shen","item_silver_key");
+        assertThat(after.stateRelations).singleElement().satisfies(relation->{
+            assertThat(relation.fromEntityKey()).isEqualTo("character_lin_shen");
+            assertThat(relation.type()).isEqualTo("OWNS");
+            assertThat(relation.toEntityKey()).isEqualTo("item_silver_key");
+        });
+        assertThat(after.stateEvidence).extracting(StateEvidence::key)
+                .containsExactly("demo_chapter_1_event","character_lin_shen","item_silver_key",
+                        "relation_lin_shen_owns_silver_key");
+        assertThat(after.stateEvidence).allSatisfy(evidence->assertThat(evidence.evidenceQuotes()).isNotEmpty());
+        assertThat(result.agentRunIds).singleElement().satisfies(runId->
+                assertThat(recovered.agentRuns.stream().filter(run->run.id.equals(runId)).findFirst().orElseThrow().role)
+                        .isEqualTo(AgentRole.STATE_EXTRACTOR.name()));
+        assertThatCode(()->workflow.confirm(id,chapter.id,after.id,recovered.revision,null)).doesNotThrowAnyException();
+    }
+
+    @Test void aStateOnlyChapterRevisionReusesContentReviewAndRunsOnlyStateExtraction() {
+        Novel n=create(); String id=n.id;
+        n=repository.update(id,stored->{
+            Artifact chapter=new Artifact(); chapter.kind=Kind.CHAPTER; chapter.chapterNumber=1;
+            Version checked=new Version(); checked.title="第一章";
+            checked.content="林深在雨夜捡到一把银色钥匙。他把钥匙收进口袋。";
+            checked.summary="林深捡到银色钥匙。";
+            checked.review=new Review(true,List.of(),false,false,false,List.of());
+            checked.reviewPolicyVersion=ReviewPolicy.VERSION;
+            chapter.versions.add(checked);
+            stored.artifacts.add(chapter);
+            checked.contentReviewFingerprint=contentReviewFingerprints.of(stored,chapter,
+                    new ModelGateway.Generated(checked.title,checked.content,checked.summary,List.of(),null),"");
+
+            Version stateOnly=new Version(); stateOnly.baseVersionId=checked.id; stateOnly.title=checked.title;
+            stateOnly.content=checked.content; stateOnly.summary=checked.summary;
+            stateOnly.stateExtractionRequired=true; stateOnly.stateExtractionStatus=StateExtractionStatus.PENDING;
+            chapter.versions.add(stateOnly);
+            return stored;
+        });
+        Artifact chapter=n.artifacts.getLast();
+
+        Task task=run(id,Action.REVIEW,chapter.id);
+
+        Novel after=repository.get(id); Version candidate=rules.artifact(after,chapter.id).latest();
+        assertThat(candidate.review.passed()).isTrue();
+        assertThat(candidate.stateExtractionStatus).isEqualTo(StateExtractionStatus.SUCCEEDED);
+        assertThat(candidate.contentReviewFingerprint).isNotBlank();
+        assertThat(task.progressStage).isEqualTo("READY");
+        assertThat(task.agentRunIds).singleElement().satisfies(runId->
+                assertThat(after.agentRuns.stream().filter(run->run.id.equals(runId)).findFirst().orElseThrow().role)
+                        .isEqualTo(AgentRole.STATE_EXTRACTOR.name()));
     }
 
 }

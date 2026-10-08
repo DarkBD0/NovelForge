@@ -42,6 +42,20 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    void modelReceivesTheRoleViewInsteadOfTheTaskMasterSnapshot() {
+        FakeGateway gateway=new FakeGateway();
+        AgentOrchestrator orchestrator=new AgentOrchestrator(gateway,new StyleReviewPolicy());
+        String json="{\"title\":\"隔离\",\"conversationBrief\":{\"acceptedDecisions\":[\"隐藏\"]},"
+                +"\"retrievedConfirmedHistory\":{\"hits\":[]},\"unrelatedInternalField\":\"不得传递\"}";
+        var context=new ContextAssembler.Context(json,List.of(),3,1);
+
+        orchestrator.generate(new ModelGateway.Request(Action.CHAPTER,null,null,context,""));
+
+        assertThat(gateway.lastRequest.context().json()).contains("CHAPTER_WRITER","retrievedConfirmedHistory")
+                .doesNotContain("conversationBrief","unrelatedInternalField");
+    }
+
+    @Test
     void routesStyleReviewOnlyToStyleGatewayAndKeepsItNonBlocking() {
         FakeGateway gateway = new FakeGateway();
         AgentOrchestrator orchestrator = new AgentOrchestrator(gateway, new StyleReviewPolicy());
@@ -116,6 +130,24 @@ class AgentOrchestratorTest {
         assertThat(gateway.outlinePlotCalls).isEqualTo(1);
     }
 
+    @Test
+    void routesStateExtractionWithItsOwnLeastPrivilegeContext() {
+        FakeGateway gateway=new FakeGateway();
+        AgentOrchestrator orchestrator=new AgentOrchestrator(gateway,new StyleReviewPolicy());
+        String json="{\"title\":\"状态提取\",\"canonBeforeChapter\":[],"
+                +"\"retrievedConfirmedHistory\":{\"hits\":[{\"content\":\"不应传入\"}]},"
+                +"\"conversationBrief\":{\"acceptedDecisions\":[\"不应传入\"]}}";
+        var request=new ModelGateway.Request(Action.CHAPTER,null,null,
+                new ContextAssembler.Context(json,List.of(),2,1),"");
+
+        var result=orchestrator.extractState(request,gateway.candidate());
+
+        assertThat(result.facts()).singleElement().satisfies(item->assertThat(item.key()).isEqualTo("event_1"));
+        assertThat(gateway.stateExtractionCalls).isEqualTo(1);
+        assertThat(gateway.lastRequest.context().json()).contains("STATE_EXTRACTOR","canonBeforeChapter")
+                .doesNotContain("retrievedConfirmedHistory","conversationBrief");
+    }
+
     private ModelGateway.Request request(Action action) {
         return new ModelGateway.Request(action, null, null, null, "");
     }
@@ -129,9 +161,11 @@ class AgentOrchestratorTest {
         int outlineFoundationCalls;
         int outlineContinuityCalls;
         int outlinePlotCalls;
+        int stateExtractionCalls;
+        Request lastRequest;
 
         @Override public Generated generate(Request request) {
-            generateCalls++;
+            generateCalls++; lastRequest=request;
             return candidate();
         }
 
@@ -168,6 +202,12 @@ class AgentOrchestratorTest {
         @Override public Review plotForeshadowReview(Request request, Generated candidate) {
             plotForeshadowReviewCalls++;
             return new Review(true,List.of(),false,false,false);
+        }
+
+        @Override public StateExtraction extractState(Request request,Generated candidate) {
+            stateExtractionCalls++; lastRequest=request;
+            return new StateExtraction(List.of(new ExtractedState("event_1","EVENT","正文中的事件","ACTIVE",
+                    List.of("正文"))));
         }
 
         @Override public String mode() { return "test"; }

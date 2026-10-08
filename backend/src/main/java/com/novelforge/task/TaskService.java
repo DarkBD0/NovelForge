@@ -14,7 +14,7 @@ import com.novelforge.outline.OutlineImpactAnalyzer;
 import com.novelforge.shared.Problem;
 import com.novelforge.workflow.*;
 import jakarta.annotation.PreDestroy;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.boot.context.event.ApplicationStartedEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import org.slf4j.Logger;
@@ -30,6 +30,7 @@ public class TaskService {
     public static final String STYLE_POLISH="STYLE_POLISH";
     public static final String AUTO_STYLE_CHECK="AUTO_STYLE_CHECK";
     public static final String OUTLINE_AUTO_REPAIR="OUTLINE_AUTO_REPAIR";
+    public static final String STATE_EXTRACTION_ONLY="STATE_EXTRACTION_ONLY";
     private final NovelRepository repository;
     private final WorkflowRules rules;
     private final WorkflowService workflow;
@@ -41,34 +42,52 @@ public class TaskService {
     private final CanonService canon;
     private final ReviewAggregator reviews;
     private final ContinuityShadowService continuityShadows;
+    private final HistoricalContinuityGrayService historicalContinuityGray;
     private final PlotForeshadowShadowService plotForeshadowShadows;
     private final DeterministicStyleEditor styleEditor;
     private final OutlinePipelineService outlinePipelines;
     private final OutlineStructureService outlineStructures;
     private final OutlineImpactAnalyzer outlineImpacts;
+    private final StateExtractionPolicy stateExtractions;
+    private final ContentReviewFingerprint contentReviewFingerprints;
     private final ExecutorService executor = Executors.newFixedThreadPool(2, r -> { Thread t = new Thread(r, "novel-task"); t.setDaemon(true); return t; });
     private final ConcurrentMap<String, FutureTask<Void>> running = new ConcurrentHashMap<>();
     private record StagedCandidate(String artifactId, String versionId, long revision, boolean needsReview) {}
+    private record StateExtractionOutcome(String runId,List<Fact> facts,List<StateEntity> entities,
+                                          List<StateRelation> relations,List<StateEvidence> evidence,String sourceHash) {}
 
     public TaskService(NovelRepository repository, WorkflowRules rules, WorkflowService workflow, ContextAssembler contexts,
                        SourceSnapshotFactory snapshots,
                        AgentOrchestrator agents, ImpactAnalyzer impact, WordCounter words, CanonService canon,
                        ReviewAggregator reviews,ContinuityShadowService continuityShadows,
+                       HistoricalContinuityGrayService historicalContinuityGray,
                        PlotForeshadowShadowService plotForeshadowShadows,
                        DeterministicStyleEditor styleEditor,OutlinePipelineService outlinePipelines,
-                       OutlineStructureService outlineStructures,OutlineImpactAnalyzer outlineImpacts) {
+                       OutlineStructureService outlineStructures,OutlineImpactAnalyzer outlineImpacts,
+                       StateExtractionPolicy stateExtractions,ContentReviewFingerprint contentReviewFingerprints) {
         this.repository=repository; this.rules=rules; this.workflow=workflow; this.contexts=contexts;
         this.snapshots=snapshots;
         this.agents=agents; this.impact=impact; this.words=words; this.canon=canon; this.reviews=reviews;
         this.continuityShadows=continuityShadows;
+        this.historicalContinuityGray=historicalContinuityGray;
         this.plotForeshadowShadows=plotForeshadowShadows;
         this.styleEditor=styleEditor;
         this.outlinePipelines=outlinePipelines;
         this.outlineStructures=outlineStructures;
         this.outlineImpacts=outlineImpacts;
+        this.stateExtractions=stateExtractions;
+        this.contentReviewFingerprints=contentReviewFingerprints;
     }
     public Task submit(String id, Action action, String artifactId, String instructions, String key, long revision) {
         return submit(id,action,artifactId,instructions,key,revision,false);
+    }
+    public Task submitConversation(String id,Action action,String artifactId,ConversationBrief brief,
+                                   String key,long revision) {
+        require(brief!=null && brief.scope==ConversationScope.OUTLINE,"当前对话简报不能用于大纲任务");
+        require(action==Action.OUTLINE || action==Action.REWRITE,"大纲对话只能生成或修订大纲");
+        String instructions="只遵循上下文 conversationBrief 中由作者明确采纳的决定生成或修订大纲；"
+                +"原始聊天、未采纳建议和开放问题都不是创作要求。";
+        return submit(id,action,artifactId,instructions,key,revision,false,"",0,brief);
     }
     public Task submitSummary(String id,String artifactId,String key,long revision) {
         Novel novel=repository.get(id);
@@ -120,26 +139,65 @@ public class TaskService {
         }
         return submit(id,Action.REWRITE,artifactId,instructions.toString().strip(),key,revision,false,STYLE_POLISH,1);
     }
+    public Task submitStateExtraction(String id,String artifactId,String key,long revision) {
+        Novel novel=repository.get(id); Artifact artifact=rules.artifact(novel,artifactId); Version version=artifact.latest();
+        require(artifact.kind==Kind.CHAPTER && version!=null && !artifact.clean(),
+                "状态提取只适用于待确认的章节正文");
+        require(version.stateExtractionRequired && !stateExtractions.current(version),
+                "当前章节不需要重新提取状态");
+        require(rules.reviewCurrent(novel,version) && version.review.passed(),
+                "内容检查必须先通过，才能只重试状态提取");
+        return submit(id,Action.REVIEW,artifactId,
+                "只重试独立状态提取；复用当前已经通过的内容检查，不修改正文、摘要或检查结论。",
+                key,revision,false,STATE_EXTRACTION_ONLY,1);
+    }
     private Task submit(String id, Action action, String artifactId, String instructions, String key, long revision,
                         boolean summaryOnly) {
         return submit(id,action,artifactId,instructions,key,revision,summaryOnly,"",0);
     }
     private Task submit(String id, Action action, String artifactId, String instructions, String key, long revision,
                         boolean summaryOnly,String automationKind,int automationRound) {
+        return submit(id,action,artifactId,instructions,key,revision,summaryOnly,automationKind,automationRound,null);
+    }
+    private Task submit(String id, Action action, String artifactId, String instructions, String key, long revision,
+                        boolean summaryOnly,String automationKind,int automationRound,ConversationBrief conversationBrief) {
         require(key != null && !key.isBlank() && key.length() <= 100, "请求需要不超过100字符的幂等键");
         String fingerprint = action + "|" + artifactId + "|" + instructions + "|" + revision + "|summaryOnly=" + summaryOnly
-                + "|automation="+automationKind+":"+automationRound;
+                + "|automation="+automationKind+":"+automationRound+"|conversationBrief="
+                +(conversationBrief==null?"":conversationBrief.id+":"+conversationBrief.hash);
         Task task = repository.update(id, n -> {
             Task existing = n.tasks.stream().filter(t -> key.equals(t.requestKey)).findFirst().orElse(null);
             if (existing != null) { require(fingerprint.equals(existing.requestFingerprint), "同一幂等键不能用于不同请求"); return existing; }
-            workflow.expected(n, revision); workflow.idle(n); rules.validateAction(n, action, artifactId);
+            workflow.expected(n, revision); workflow.idle(n);
+            if (STATE_EXTRACTION_ONLY.equals(automationKind)) {
+                Artifact chapter=rules.artifact(n,artifactId); Version version=chapter.latest();
+                require(action==Action.REVIEW && chapter.kind==Kind.CHAPTER && version!=null && !chapter.clean(),
+                        "状态提取只适用于待确认的章节正文");
+                require(version.stateExtractionRequired && !stateExtractions.current(version),
+                        "当前章节不需要重新提取状态");
+                require(rules.reviewCurrent(n,version) && version.review.passed(),
+                        "内容检查必须先通过，才能只重试状态提取");
+            } else rules.validateAction(n, action, artifactId);
             require(agents.ready(), "真实模型尚未配置地址和名称");
-            var context = contexts.assemble(n, action, artifactId);
+            ConversationBrief persistedBrief=null;
+            if (conversationBrief!=null) {
+                persistedBrief=n.conversationBriefs.stream().filter(item->item.id.equals(conversationBrief.id)).findFirst().orElse(null);
+                require(persistedBrief!=null && Objects.equals(persistedBrief.hash,conversationBrief.hash),
+                        "对话简报不存在或校验失败");
+                require(persistedBrief.baseRevision==n.revision,"对话简报所依据的小说版本已经变化，请重新整理");
+            }
+            var context = contexts.assemble(n, action, artifactId,persistedBrief);
             Task t = new Task(); t.action=action; t.artifactId=artifactId; t.instructions=instructions == null ? "" : instructions;
             t.summaryOnly=summaryOnly;
             t.automationKind=automationKind==null?"":automationKind; t.automationRound=automationRound;
             t.inputRevision=n.revision; t.requestKey=key; t.requestFingerprint=fingerprint;
             SourceSnapshot source=snapshots.capture(t.id,n.revision,action,artifactId,context);
+            if (persistedBrief!=null) {
+                t.conversationBriefId=persistedBrief.id; t.conversationBriefHash=persistedBrief.hash;
+                t.acceptedDecisionIds=new ArrayList<>(persistedBrief.acceptedDecisionIds);
+                source.conversationBriefId=persistedBrief.id; source.conversationBriefHash=persistedBrief.hash;
+                source.acceptedDecisionIds=new ArrayList<>(persistedBrief.acceptedDecisionIds);
+            }
             t.sourceSnapshotId=source.id; t.sourceVersionIds=new ArrayList<>(source.sourceVersionIds);
             n.sourceSnapshots.add(source); n.tasks.add(t); return t;
         });
@@ -157,8 +215,8 @@ public class TaskService {
             boolean started = repository.update(id, n -> {
                 Task t = find(n, taskId);
                 if (t.status != TaskStatus.QUEUED) return false;
-                if (t.inputRevision != n.revision) { t.status=TaskStatus.STALE; t.finishedAt=Novel.now(); return false; }
-                t.status=TaskStatus.RUNNING; return true;
+                if (t.inputRevision != n.revision) { t.status=TaskStatus.STALE; t.progressStage="STALE"; t.finishedAt=Novel.now(); return false; }
+                t.status=TaskStatus.RUNNING; t.progressStage="PREPARING"; return true;
             });
             if (!started) return;
             Novel snapshot = repository.get(id);
@@ -176,6 +234,7 @@ public class TaskService {
             OutlinePipelineWorkspace previousOutlineWorkspace=null;
             OutlineImpactAnalyzer.ReviewScope outlineReviewScope=null;
             boolean deferredStylePolish=STYLE_POLISH.equals(task.automationKind);
+            boolean stateExtractionOnly=STATE_EXTRACTION_ONLY.equals(task.automationKind);
             boolean outlineTarget=task.action==Action.OUTLINE || (target!=null && target.kind==Kind.OUTLINE);
             if (outlineTarget) {
                 String resumedFrom=null;
@@ -199,11 +258,13 @@ public class TaskService {
                 }
             }
             if (task.action==Action.OUTLINE) {
+                progress(id,taskId,"DESIGNING");
+                ModelGateway.Request foundationRequest=agents.contextFor(request,AgentRole.CHARACTER_WORLD_DESIGNER);
                 foundationRunId=startAgentRun(id,taskId,source.id,AgentRole.CHARACTER_WORLD_DESIGNER,
-                        "outline-foundation",null,List.of());
+                        "outline-foundation",null,List.of(),foundationRequest.context());
                 activeAgentRunId=foundationRunId;
                 outlinePipelines.startStep(id,activeOutlineWorkspaceId,OutlinePipelineService.FOUNDATION,foundationRunId);
-                ModelGateway.Generated foundationGenerated=agents.outlineFoundation(request);
+                ModelGateway.Generated foundationGenerated=agents.outlineFoundation(foundationRequest);
                 OutlineFoundationDraft foundation=outlinePipelines.saveFoundation(id,activeOutlineWorkspaceId,foundationGenerated);
                 completeAgentRun(id,foundationRunId,null,null);
                 activeAgentRunId=null;
@@ -213,20 +274,24 @@ public class TaskService {
                 Version v = target.latest(); candidate = new ModelGateway.Generated(v.title, v.content, v.summary,
                         v.facts, v.plan, v.outlineSpec, List.of());
             } else if (task.action != Action.COMPLETE) {
+                progress(id,taskId,"GENERATING");
                 AgentRole generationRole=deferredStylePolish
                         ? AgentRole.STYLE_EDITOR : outlineTarget ? AgentRole.STORY_ARCHITECT : agents.generationRole(task.action);
+                ModelGateway.Request generationRequest=agents.contextFor(request,generationRole);
                 generationRunId=startAgentRun(id,taskId,source.id,generationRole,
                         deferredStylePolish?"deterministic-style-edit":outlineTarget&&task.action==Action.REWRITE
                                 ?"outline-rewrite":"generate",
                         target==null||target.latest()==null?null:target.latest().id,
-                        foundationRunId==null?List.of():List.of(foundationRunId));
+                        foundationRunId==null?List.of():List.of(foundationRunId),generationRequest.context());
                 activeAgentRunId=generationRunId;
                 if (outlineTarget)
                     outlinePipelines.startStep(id,activeOutlineWorkspaceId,OutlinePipelineService.ARCHITECT,generationRunId);
                 candidate = deferredStylePolish
-                        ? styleEditor.apply(target.latest()) : agents.generate(request);
+                        ? styleEditor.apply(target.latest()) : agents.generate(generationRequest);
                 if (outlineTarget && !deferredStylePolish)
                     candidate=outlineStructures.normalizeGenerated(snapshot,candidate);
+                if (!task.summaryOnly && (task.action==Action.CHAPTER || target!=null && target.kind==Kind.CHAPTER))
+                    candidate=withoutWriterFacts(candidate);
                 if (outlineTarget && OUTLINE_AUTO_REPAIR.equals(task.automationKind)) {
                     outlineReviewScope=outlineImpacts.analyze(target==null||target.latest()==null?null:target.latest().outlineSpec,
                             candidate.outlineSpec());
@@ -234,17 +299,13 @@ public class TaskService {
                 }
                 if (task.summaryOnly) validateSummaryOnly(target,candidate);
                 if (!deferredStylePolish) {
-                    staged=stageCandidate(id,taskId,task,context,candidate,generationRunId);
+                    staged=stageCandidate(id,taskId,task,context,candidate,generationRunId,activeOutlineWorkspaceId);
                     activeAgentRunId=null;
-                    if (outlineTarget && staged!=null)
-                        outlinePipelines.saveCandidate(id,activeOutlineWorkspaceId,staged.artifactId(),staged.versionId());
                     if (staged==null) {
                         stopOutlineWorkspaceForTask(id,taskId,activeOutlineWorkspaceId);
                         return;
                     }
                     if (!staged.needsReview()) {
-                        if (outlineTarget) outlinePipelines.needsInput(id,activeOutlineWorkspaceId,
-                                "大纲候选已经保存，但结构化摘要或档案信息不完整；补全后可单独重新检查");
                         return;
                     }
                 }
@@ -256,15 +317,14 @@ public class TaskService {
             }
             Review deterministicOutlineReview=null;
             if (outlineTarget && candidate!=null && candidate.outlineSpec()!=null) {
+                progress(id,taskId,"CHECKING_STRUCTURE");
                 Version stored=staged!=null
                         ? rules.artifact(repository.get(id),staged.artifactId()).latest()
                         : target==null?null:target.latest();
                 deterministicOutlineReview=outlineStructures.validate(snapshot,candidate,stored);
                 outlinePipelines.saveDeterministicReview(id,activeOutlineWorkspaceId,deterministicOutlineReview);
                 if (!deterministicOutlineReview.passed()) {
-                    finishOutlineWithDeterministicIssues(id,taskId,staged,target,deterministicOutlineReview);
-                    outlinePipelines.needsInput(id,activeOutlineWorkspaceId,
-                            "结构化大纲未通过确定性检查；候选已经保存，未继续调用专业检查");
+                    finishOutlineWithDeterministicIssues(id,taskId,staged,target,deterministicOutlineReview,activeOutlineWorkspaceId);
                     queueAutomaticOutlineRepair(id,staged==null?target.id:staged.artifactId(),
                             staged==null?target.latest().id:staged.versionId(),deterministicOutlineReview,task);
                     return;
@@ -274,6 +334,7 @@ public class TaskService {
                     :target==null||target.latest()==null?null:target.latest().id;
             String reviewRunId;
             Review review;
+            String contentReviewFingerprint=null;
             if (outlineTarget) {
                 List<String> auditUpstream=generationRunId==null?List.of():List.of(generationRunId);
                 String continuityRunId=null;
@@ -281,11 +342,13 @@ public class TaskService {
                 boolean runContinuity=outlineReviewScope==null || outlineReviewScope.continuityRequired()
                         || previousOutlineWorkspace==null || previousOutlineWorkspace.continuityReview==null;
                 if (runContinuity) {
+                    progress(id,taskId,"CHECKING_CONTINUITY");
+                    ModelGateway.Request continuityRequest=agents.contextFor(request,AgentRole.CONTINUITY_AUDITOR);
                     continuityRunId=startAgentRun(id,taskId,source.id,AgentRole.CONTINUITY_AUDITOR,
-                            "outline-continuity-review",inputVersionId,auditUpstream);
+                            "outline-continuity-review",inputVersionId,auditUpstream,continuityRequest.context());
                     activeAgentRunId=continuityRunId;
                     outlinePipelines.startStep(id,activeOutlineWorkspaceId,OutlinePipelineService.CONTINUITY,continuityRunId);
-                    continuity=agents.outlineContinuityReview(request,candidate);
+                    continuity=agents.outlineContinuityReview(continuityRequest,candidate);
                     outlinePipelines.saveAudit(id,activeOutlineWorkspaceId,OutlinePipelineService.CONTINUITY,continuity);
                     completeAgentRun(id,continuityRunId,staged==null?target.id:staged.artifactId(),inputVersionId);
                     activeAgentRunId=null;
@@ -300,11 +363,13 @@ public class TaskService {
                 boolean runPlot=outlineReviewScope==null || outlineReviewScope.plotRequired()
                         || previousOutlineWorkspace==null || previousOutlineWorkspace.plotReview==null;
                 if (runPlot) {
+                    progress(id,taskId,"CHECKING_PLOT");
+                    ModelGateway.Request plotRequest=agents.contextFor(request,AgentRole.PLOT_FORESHADOW_AUDITOR);
                     plotRunId=startAgentRun(id,taskId,source.id,AgentRole.PLOT_FORESHADOW_AUDITOR,
-                            "outline-plot-review",inputVersionId,auditUpstream);
+                            "outline-plot-review",inputVersionId,auditUpstream,plotRequest.context());
                     activeAgentRunId=plotRunId;
                     outlinePipelines.startStep(id,activeOutlineWorkspaceId,OutlinePipelineService.PLOT,plotRunId);
-                    plot=agents.outlinePlotReview(request,candidate);
+                    plot=agents.outlinePlotReview(plotRequest,candidate);
                     outlinePipelines.saveAudit(id,activeOutlineWorkspaceId,OutlinePipelineService.PLOT,plot);
                     completeAgentRun(id,plotRunId,staged==null?target.id:staged.artifactId(),inputVersionId);
                     activeAgentRunId=null;
@@ -315,50 +380,112 @@ public class TaskService {
                 }
                 review=outlinePipelines.merge(deterministicOutlineReview,continuity,plot);
                 reviewRunId=plotRunId!=null?plotRunId:continuityRunId!=null?continuityRunId:generationRunId;
+            } else if (stateExtractionOnly) {
+                require(target!=null && target.kind==Kind.CHAPTER && target.latest()!=null,
+                        "只重试状态提取的章节不存在");
+                require(rules.reviewCurrent(snapshot,target.latest()) && target.latest().review.passed(),
+                        "当前内容检查已经变化，请先重新检查");
+                review=target.latest().review;
+                reviewRunId=null;
+                contentReviewFingerprint=target.latest().contentReviewFingerprint;
             } else {
-                reviewRunId=startAgentRun(id,taskId,source.id,agents.reviewRole(task.action),"review",
-                        inputVersionId,generationRunId==null?List.of():List.of(generationRunId));
-                activeAgentRunId=reviewRunId;
-                review=agents.review(request,candidate);
+                boolean fingerprintedContent=candidate!=null
+                        && task.action!=Action.STYLE_REVIEW && task.action!=Action.COMPLETE;
+                if(fingerprintedContent)
+                    contentReviewFingerprint=contentReviewFingerprints.of(snapshot,target,candidate,task.instructions);
+                Review reusable=fingerprintedContent?reusableContentReview(target,contentReviewFingerprint):null;
+                if(reusable!=null) {
+                    progress(id,taskId,"REUSING_CONTENT_REVIEW");
+                    reviewRunId=null;
+                    review=reusable;
+                } else {
+                    progress(id,taskId,"CHECKING");
+                    AgentRole reviewRole=agents.reviewRole(task.action);
+                    ModelGateway.Request reviewRequest=agents.contextFor(request,reviewRole);
+                    reviewRunId=startAgentRun(id,taskId,source.id,reviewRole,"review",
+                            inputVersionId,generationRunId==null?List.of():List.of(generationRunId),reviewRequest.context());
+                    activeAgentRunId=reviewRunId;
+                    review=agents.review(reviewRequest,candidate);
+                }
             }
             Version previous=task.action==Action.REWRITE && target!=null ? target.latest() : null;
-            review=task.action==Action.STYLE_REVIEW ? reviews.aggregateAdvisory(review)
-                    : reviews.aggregate(snapshot,target,task.action,task.instructions,candidate,previous,review,
-                    CONTENT_FIX.equals(task.automationKind)?task.automationRound:0);
+            if (!stateExtractionOnly)
+                review=task.action==Action.STYLE_REVIEW ? reviews.aggregateAdvisory(review)
+                        : reviews.aggregate(snapshot,target,task.action,task.instructions,candidate,previous,review,
+                        CONTENT_FIX.equals(task.automationKind)?task.automationRound:0);
             Review finalReview=review;
             String finalReviewRunId=reviewRunId;
+            String finalContentReviewFingerprint=contentReviewFingerprint;
             Review styleRecheck=null;
             String styleRecheckRunId=null;
             if (deferredStylePolish) {
                 require(finalReview.passed(),
                         "自动文风修改未通过内容一致性检查，未创建候选版本；原内容保持不变，相关建议保留给作者决定");
-                styleRecheckRunId=startAgentRun(id,taskId,source.id,AgentRole.STYLE_AUDITOR,"style-recheck",
-                        inputVersionId,List.of(finalReviewRunId));
-                activeAgentRunId=styleRecheckRunId;
                 var styleRequest=new ModelGateway.Request(Action.STYLE_REVIEW,snapshot,target,context,
                         "自动文风修改后的唯一一次复查；剩余建议只展示，不再自动修改。");
+                styleRequest=agents.contextFor(styleRequest,AgentRole.STYLE_AUDITOR);
+                styleRecheckRunId=startAgentRun(id,taskId,source.id,AgentRole.STYLE_AUDITOR,"style-recheck",
+                        inputVersionId,List.of(finalReviewRunId),styleRequest.context());
+                activeAgentRunId=styleRecheckRunId;
                 styleRecheck=reviews.aggregateAdvisory(agents.review(styleRequest,candidate));
                 // Do not make the polished text the latest candidate until both its content
                 // safety check and its one permitted style recheck have completed.
-                staged=stageCandidate(id,taskId,task,context,candidate,generationRunId);
+                staged=stageCandidate(id,taskId,task,context,candidate,generationRunId,activeOutlineWorkspaceId);
                 if (staged==null || !staged.needsReview()) return;
                 inputVersionId=staged.versionId();
             }
+            StateExtractionOutcome stateOutcome=null;
+            Artifact stateArtifact=staged!=null
+                    ?rules.artifact(repository.get(id),staged.artifactId()):target;
+            Version stateVersion=stateArtifact==null?null:stateArtifact.latest();
+            if (finalReview.passed() && stateArtifact!=null && stateArtifact.kind==Kind.CHAPTER
+                    && task.action!=Action.STYLE_REVIEW && task.action!=Action.COMPLETE
+                    && !stateExtractions.current(stateVersion)) {
+                progress(id,taskId,"EXTRACTING_STATE");
+                ModelGateway.Generated stateCandidate=new ModelGateway.Generated(stateVersion.title,stateVersion.content,
+                        stateVersion.summary,List.of(),stateVersion.plan,stateVersion.outlineSpec,List.of());
+                ModelGateway.Request stateRequest=new ModelGateway.Request(task.action,snapshot,stateArtifact,context,
+                        "只从已经通过内容检查的当前章节正文提取后续创作需要的状态变化，不修改正文。");
+                stateRequest=agents.contextFor(stateRequest,AgentRole.STATE_EXTRACTOR);
+                String stateRunId=startAgentRun(id,taskId,source.id,AgentRole.STATE_EXTRACTOR,"extract-state",
+                        stateVersion.id,finalReviewRunId==null?List.of():List.of(finalReviewRunId),stateRequest.context());
+                activeAgentRunId=stateRunId;
+                markStateExtractionRunning(id,stateArtifact.id,stateVersion.id,stateRunId);
+                try {
+                    ModelGateway.StateExtraction extracted=agents.extractState(stateRequest,stateCandidate);
+                    StateExtractionPolicy.ValidatedState validated=stateExtractions.validateAll(stateCandidate,extracted);
+                    stateOutcome=new StateExtractionOutcome(stateRunId,validated.facts(),validated.entities(),
+                            validated.relations(),validated.evidence(),
+                            stateExtractions.contentHash(stateVersion.content));
+                } catch(Exception failure) {
+                    preserveReviewAndMarkStateExtractionFailed(id,taskId,stateArtifact.id,stateVersion.id,
+                            finalReview,finalReviewRunId,stateRunId,contentReviewFingerprint,failure);
+                    throw failure;
+                }
+            }
             Review finalStyleRecheck=styleRecheck;
             String finalStyleRecheckRunId=styleRecheckRunId;
+            String finalOutlineWorkspaceId=activeOutlineWorkspaceId;
+            StateExtractionOutcome finalStateOutcome=stateOutcome;
             repository.update(id, n -> {
                 Task current = find(n, taskId);
                 AgentRun agentRun=finalReviewRunId==null?null:findAgentRun(n,finalReviewRunId);
                 if (current.status != TaskStatus.RUNNING) {
                     if (agentRun!=null)
                         transitionAgentRun(agentRun,runStatus(current.status),null,null,"任务已停止，检查结果未写入");
+                    if(finalStateOutcome!=null)
+                        transitionAgentRun(findAgentRun(n,finalStateOutcome.runId()),runStatus(current.status),
+                                null,null,"任务已停止，状态提取结果未写入");
                     return null;
                 }
                 long expectedRevision=task.action==Action.REVIEW || task.action==Action.STYLE_REVIEW || task.action==Action.COMPLETE
                         ? current.inputRevision : current.stagedRevision;
                 if (n.revision != expectedRevision) {
-                    current.status=TaskStatus.STALE; current.error="输入版本发生变化，结果未写入"; current.finishedAt=Novel.now();
+                    current.status=TaskStatus.STALE; current.progressStage="STALE"; current.error="输入版本发生变化，结果未写入"; current.finishedAt=Novel.now();
                     if (agentRun!=null) transitionAgentRun(agentRun,AgentRunStatus.STALE,null,null,current.error);
+                    if(finalStateOutcome!=null)
+                        transitionAgentRun(findAgentRun(n,finalStateOutcome.runId()),AgentRunStatus.STALE,
+                                null,null,current.error);
                     return null;
                 }
                 if (task.action == Action.COMPLETE) {
@@ -380,6 +507,8 @@ public class TaskService {
                     Artifact a = rules.artifact(n, task.artifactId);
                     a.latest().review=finalReview; a.latest().reviewRevision=n.revision;
                     a.latest().reviewPolicyVersion=ReviewPolicy.VERSION;
+                    a.latest().contentReviewFingerprint=finalContentReviewFingerprint;
+                    if(finalStateOutcome!=null) applyStateExtraction(a.latest(),finalStateOutcome);
                     current.resultArtifactId=a.id; current.resultVersionId=a.latest().id;
                 } else {
                     Artifact a=rules.artifact(n,current.resultArtifactId);
@@ -387,10 +516,12 @@ public class TaskService {
                             .orElseThrow(()->new Problem(409,"已保存的候选版本不存在，请刷新后重试"));
                     v.review=finalReview; v.reviewRevision=n.revision;
                     v.reviewPolicyVersion=ReviewPolicy.VERSION;
+                    v.contentReviewFingerprint=finalContentReviewFingerprint;
                     if (finalStyleRecheck!=null) {
                         v.styleReview=finalStyleRecheck;
                         v.styleReviewPolicyVersion=StyleReviewPolicy.VERSION;
                     }
+                    if(finalStateOutcome!=null) applyStateExtraction(v,finalStateOutcome);
                     if (a.kind == Kind.CHAPTER) {
                         long projected=words.approvedWords(n) - (a.approved()==null ? 0 : words.count(a.approved().content)) + words.count(v.content);
                         if (projected > n.approvedMaxWords) {
@@ -399,35 +530,42 @@ public class TaskService {
                         }
                     }
                 }
-                current.status=TaskStatus.SUCCEEDED; current.finishedAt=Novel.now();
+                current.status=TaskStatus.SUCCEEDED; current.progressStage="READY"; current.finishedAt=Novel.now();
                 if (agentRun!=null)
                     transitionAgentRun(agentRun,AgentRunStatus.SUCCEEDED,current.resultArtifactId,current.resultVersionId,null);
                 if (finalStyleRecheckRunId!=null)
                     transitionAgentRun(findAgentRun(n,finalStyleRecheckRunId),AgentRunStatus.SUCCEEDED,
                             current.resultArtifactId,current.resultVersionId,null);
+                if(finalStateOutcome!=null)
+                    transitionAgentRun(findAgentRun(n,finalStateOutcome.runId()),AgentRunStatus.SUCCEEDED,
+                            current.resultArtifactId,current.resultVersionId,null);
+                if(finalOutlineWorkspaceId!=null) outlinePipelines.complete(n,finalOutlineWorkspaceId,finalReview);
                 return null;
             });
-            if (activeOutlineWorkspaceId!=null && find(repository.get(id),taskId).status==TaskStatus.SUCCEEDED)
-                outlinePipelines.complete(id,activeOutlineWorkspaceId,finalReview);
-            boolean eligibleShadow=!outlineTarget && task.action!=Action.STYLE_REVIEW
+            boolean eligibleShadow=!stateExtractionOnly && !outlineTarget && task.action!=Action.STYLE_REVIEW
                     && task.action!=Action.COMPLETE && !task.summaryOnly;
             String artifactId=staged!=null?staged.artifactId():target==null?null:target.id;
             String versionId=staged!=null?staged.versionId():target==null||target.latest()==null?null:target.latest().id;
+            ModelGateway.Generated downstreamCandidate=finalStateOutcome==null?candidate
+                    :new ModelGateway.Generated(candidate.title(),candidate.content(),candidate.summary(),
+                    finalStateOutcome.facts(),candidate.plan(),candidate.outlineSpec(),candidate.draftIssues());
             if (outlineTarget)
                 queueAutomaticOutlineRepair(id,artifactId,versionId,finalReview,task);
             List<String> shadowUpstream=generationRunId==null?List.of():List.of(generationRunId);
             boolean chapterCandidate=task.action==Action.CHAPTER || (target!=null && target.kind==Kind.CHAPTER);
             if (eligibleShadow && chapterCandidate) {
-                continuityShadows.run(id,taskId,source.id,artifactId,versionId,request,candidate,
+                continuityShadows.run(id,taskId,source.id,artifactId,versionId,request,downstreamCandidate,
+                        shadowUpstream);
+                historicalContinuityGray.run(id,taskId,source.id,artifactId,versionId,request,downstreamCandidate,
                         shadowUpstream);
             }
             boolean plotCandidate=List.of(Action.OUTLINE,Action.PLAN,Action.CHAPTER).contains(task.action)
                     || (target!=null && List.of(Kind.OUTLINE,Kind.PLAN,Kind.CHAPTER).contains(target.kind));
             if (eligibleShadow && plotCandidate) {
-                plotForeshadowShadows.run(id,taskId,source.id,artifactId,versionId,request,candidate,
+                plotForeshadowShadows.run(id,taskId,source.id,artifactId,versionId,request,downstreamCandidate,
                         shadowUpstream);
             }
-            if (!deferredStylePolish && finalReview.passed()
+            if (!stateExtractionOnly && !deferredStylePolish && finalReview.passed()
                     && (task.action==Action.CHAPTER
                     || (target!=null && target.kind==Kind.CHAPTER && List.of(Action.REWRITE,Action.REVIEW).contains(task.action))))
                 queueAutomaticStyleCheck(id,artifactId,versionId);
@@ -449,7 +587,7 @@ public class TaskService {
                         .forEach(run->transitionAgentRun(run,AgentRunStatus.FAILED,null,null,
                                 e instanceof Problem?e.getMessage():"Agent 步骤失败"));
                 if (t.status == TaskStatus.RUNNING || t.status == TaskStatus.QUEUED) {
-                    t.status=TaskStatus.FAILED; t.finishedAt=Novel.now();
+                    t.status=TaskStatus.FAILED; t.progressStage="FAILED"; t.finishedAt=Novel.now();
                     String message=e instanceof Problem ? e.getMessage() : "任务失败；原有版本保留，请查看本机日志或重试";
                     if (t.resultVersionId!=null)
                         message+="；候选内容已保存，可单独重新检查或修改，不需要重新生成正文";
@@ -474,7 +612,7 @@ public class TaskService {
     }
 
     private void finishOutlineWithDeterministicIssues(String novelId,String taskId,StagedCandidate staged,
-                                                       Artifact target,Review review) {
+                                                       Artifact target,Review review,String workspaceId) {
         repository.update(novelId,n->{
             Task task=find(n,taskId);
             Artifact artifact=staged!=null?rules.artifact(n,staged.artifactId()):rules.artifact(n,target.id);
@@ -482,7 +620,9 @@ public class TaskService {
             version.review=review; version.reviewRevision=n.revision;
             version.reviewPolicyVersion=OutlineStructureService.VERSION;
             task.resultArtifactId=artifact.id; task.resultVersionId=version.id;
-            task.status=TaskStatus.SUCCEEDED; task.finishedAt=Novel.now();
+            task.status=TaskStatus.SUCCEEDED; task.progressStage="READY"; task.finishedAt=Novel.now();
+            outlinePipelines.needsInput(n,workspaceId,
+                    "结构化大纲未通过确定性检查；候选已经保存，未继续调用专业检查");
             return null;
         });
     }
@@ -548,7 +688,7 @@ public class TaskService {
         }
     }
     private StagedCandidate stageCandidate(String id,String taskId,Task task,ContextAssembler.Context context,
-                                            ModelGateway.Generated result,String agentRunId) {
+                                            ModelGateway.Generated result,String agentRunId,String outlineWorkspaceId) {
         return repository.update(id,n->{
             Task current=find(n,taskId);
             AgentRun agentRun=findAgentRun(n,agentRunId);
@@ -557,7 +697,7 @@ public class TaskService {
                 return null;
             }
             if (n.revision!=current.inputRevision) {
-                current.status=TaskStatus.STALE; current.error="输入版本发生变化，结果未写入"; current.finishedAt=Novel.now();
+                current.status=TaskStatus.STALE; current.progressStage="STALE"; current.error="输入版本发生变化，结果未写入"; current.finishedAt=Novel.now();
                 transitionAgentRun(agentRun,AgentRunStatus.STALE,null,null,current.error); return null;
             }
             Artifact artifact;
@@ -589,6 +729,8 @@ public class TaskService {
             }
             version.source=STYLE_POLISH.equals(task.automationKind)?"SYSTEM":agents.mode().equals("demo")?"DEMO":"MODEL";
             version.basedOnRevision=n.revision; version.sourceVersionIds=context.sourceVersions();
+            version.previousNeedsRevision=artifact.needsRevision;
+            prepareChapterState(artifact,baseVersion,version);
             validateStagedVersion(n,artifact,version);
             if (task.action==Action.REWRITE && !OUTLINE_AUTO_REPAIR.equals(task.automationKind))
                 impact.invalidateFollowing(n,artifact,task.instructions);
@@ -596,11 +738,15 @@ public class TaskService {
             if (task.action!=Action.REWRITE) n.artifacts.add(artifact);
             n.revision++;
             current.resultArtifactId=artifact.id; current.resultVersionId=version.id; current.stagedRevision=n.revision;
+            if(outlineWorkspaceId!=null)
+                outlinePipelines.saveCandidate(n,outlineWorkspaceId,artifact.id,version.id);
             transitionAgentRun(agentRun,AgentRunStatus.SUCCEEDED,artifact.id,version.id,null);
             boolean needsReview=version.draftIssues.isEmpty();
             if (!needsReview) {
                 version.review=incompleteDraftReview(version.draftIssues); version.reviewRevision=n.revision;
-                current.status=TaskStatus.SUCCEEDED; current.finishedAt=Novel.now();
+                current.status=TaskStatus.SUCCEEDED; current.progressStage="READY"; current.finishedAt=Novel.now();
+                if(outlineWorkspaceId!=null) outlinePipelines.needsInput(n,outlineWorkspaceId,
+                        "大纲候选已经保存，但结构化摘要或档案信息不完整；补全后可单独重新检查");
             }
             return new StagedCandidate(artifact.id,version.id,n.revision,needsReview);
         });
@@ -612,6 +758,96 @@ public class TaskService {
             version.summary="待补全的内容摘要";
             rules.validateVersion(novel,artifact,version);
         } finally { version.summary=originalSummary; }
+    }
+
+    private ModelGateway.Generated withoutWriterFacts(ModelGateway.Generated candidate) {
+        return new ModelGateway.Generated(candidate.title(),candidate.content(),candidate.summary(),List.of(),
+                candidate.plan(),candidate.outlineSpec(),candidate.draftIssues());
+    }
+
+    private void prepareChapterState(Artifact artifact,Version base,Version version) {
+        if(artifact.kind!=Kind.CHAPTER) return;
+        version.stateExtractionRequired=true;
+        if(base!=null && Objects.equals(base.content,version.content) && stateExtractions.current(base)) {
+            version.facts=base.facts==null?List.of():List.copyOf(base.facts);
+            version.stateExtractionStatus=StateExtractionStatus.SUCCEEDED;
+            version.stateExtractionPolicyVersion=base.stateExtractionPolicyVersion;
+            version.stateExtractionSourceHash=base.stateExtractionSourceHash;
+            version.stateExtractionAgentRunId=base.stateExtractionAgentRunId;
+            version.stateEvidence=base.stateEvidence==null?new ArrayList<>():new ArrayList<>(base.stateEvidence);
+            version.stateEntities=base.stateEntities==null?new ArrayList<>():new ArrayList<>(base.stateEntities);
+            version.stateRelations=base.stateRelations==null?new ArrayList<>():new ArrayList<>(base.stateRelations);
+            return;
+        }
+        version.facts=List.of();
+        version.stateExtractionStatus=StateExtractionStatus.PENDING;
+        version.stateExtractionPolicyVersion=null; version.stateExtractionSourceHash=null;
+        version.stateExtractionAgentRunId=null; version.stateExtractionError=null;
+        version.stateEvidence=new ArrayList<>();
+        version.stateEntities=new ArrayList<>(); version.stateRelations=new ArrayList<>();
+    }
+
+    private void markStateExtractionRunning(String novelId,String artifactId,String versionId,String runId) {
+        repository.update(novelId,n->{
+            Version version=version(rules.artifact(n,artifactId),versionId);
+            version.stateExtractionRequired=true; version.stateExtractionStatus=StateExtractionStatus.PENDING;
+            version.stateExtractionAgentRunId=runId; version.stateExtractionError=null;
+            return null;
+        });
+    }
+
+    private void preserveReviewAndMarkStateExtractionFailed(String novelId,String taskId,String artifactId,
+                                                              String versionId,Review review,String reviewRunId,
+                                                              String stateRunId,String contentReviewFingerprint,
+                                                              Exception failure) {
+        repository.update(novelId,n->{
+            Task task=find(n,taskId);
+            Version version=version(rules.artifact(n,artifactId),versionId);
+            long expectedRevision=task.action==Action.REVIEW || task.action==Action.STYLE_REVIEW
+                    || task.action==Action.COMPLETE ? task.inputRevision : task.stagedRevision;
+            if(task.status==TaskStatus.RUNNING && n.revision==expectedRevision) {
+                version.review=review;
+                version.reviewRevision=n.revision;
+                version.reviewPolicyVersion=ReviewPolicy.VERSION;
+                version.contentReviewFingerprint=contentReviewFingerprint;
+                task.resultArtifactId=artifactId;
+                task.resultVersionId=versionId;
+                if(reviewRunId!=null)
+                    transitionAgentRun(findAgentRun(n,reviewRunId),AgentRunStatus.SUCCEEDED,
+                            artifactId,versionId,null);
+            }
+            version.stateExtractionRequired=true; version.stateExtractionStatus=StateExtractionStatus.FAILED;
+            version.stateExtractionAgentRunId=stateRunId;
+            version.stateExtractionError=failure instanceof Problem?failure.getMessage()
+                    :"独立状态提取失败；正文草稿已经保留，可以只重试状态提取";
+            return null;
+        });
+    }
+
+    private Review reusableContentReview(Artifact target,String fingerprint) {
+        if(target==null || fingerprint==null) return null;
+        for(int index=target.versions.size()-1;index>=0;index--) {
+            Version version=target.versions.get(index);
+            if(version.review!=null && ReviewPolicy.VERSION.equals(version.reviewPolicyVersion)
+                    && fingerprint.equals(version.contentReviewFingerprint)) return version.review;
+        }
+        return null;
+    }
+
+    private void applyStateExtraction(Version version,StateExtractionOutcome outcome) {
+        version.facts=List.copyOf(outcome.facts());
+        version.stateEntities=new ArrayList<>(outcome.entities());
+        version.stateRelations=new ArrayList<>(outcome.relations());
+        version.stateEvidence=new ArrayList<>(outcome.evidence());
+        version.stateExtractionRequired=true; version.stateExtractionStatus=StateExtractionStatus.SUCCEEDED;
+        version.stateExtractionPolicyVersion=StateExtractionPolicy.VERSION;
+        version.stateExtractionSourceHash=outcome.sourceHash();
+        version.stateExtractionAgentRunId=outcome.runId(); version.stateExtractionError=null;
+    }
+
+    private Version version(Artifact artifact,String versionId) {
+        return artifact.versions.stream().filter(item->versionId.equals(item.id)).findFirst()
+                .orElseThrow(()->new Problem(409,"状态提取对应的正文版本不存在"));
     }
     private Review incompleteDraftReview(List<String> issues) {
         List<ReviewIssue> details=issues.stream().map(issue->{
@@ -640,12 +876,16 @@ public class TaskService {
                 .orElseThrow(()->new Problem(409,"任务来源快照不存在，不能调用模型"));
     }
     private String startAgentRun(String novelId,String taskId,String sourceSnapshotId,AgentRole role,String operation,
-                                 String inputVersionId,List<String> upstreamAgentRunIds) {
+                                 String inputVersionId,List<String> upstreamAgentRunIds,ContextAssembler.Context context) {
         return repository.update(novelId,n->{
             Task task=find(n,taskId);
             require(task.status==TaskStatus.RUNNING,"任务已经停止，不能开始新的 Agent 步骤");
             AgentRun run=new AgentRun(); run.taskId=taskId; run.sourceSnapshotId=sourceSnapshotId;
             run.role=role.name(); run.operation=operation; run.inputVersionId=inputVersionId;
+            run.contextPolicyVersion=AgentContextPolicy.VERSION;
+            run.contextJson=context.json(); run.contextHash=snapshots.hash(context.json());
+            run.contextSourceVersionIds=new ArrayList<>(context.sourceVersions());
+            run.contextChapterNumber=context.chapterNumber(); run.contextBatchNumber=context.batchNumber();
             run.upstreamAgentRunIds=new ArrayList<>(upstreamAgentRunIds);
             n.agentRuns.add(run); task.agentRunIds.add(run.id); return run.id;
         });
@@ -660,6 +900,13 @@ public class TaskService {
         require(runId!=null && novel.agentRuns!=null,"Agent 调用记录不存在");
         return novel.agentRuns.stream().filter(run->runId.equals(run.id)).findFirst()
                 .orElseThrow(()->new Problem(409,"Agent 调用记录不存在"));
+    }
+    private void progress(String novelId,String taskId,String stage) {
+        repository.update(novelId,n->{
+            Task task=find(n,taskId);
+            if (task.status==TaskStatus.RUNNING) task.progressStage=stage;
+            return null;
+        });
     }
     private void transitionAgentRun(AgentRun run,AgentRunStatus status,String resultArtifactId,String resultVersionId,String error) {
         if (run.status!=AgentRunStatus.RUNNING) return;
@@ -679,7 +926,7 @@ public class TaskService {
         Task t = repository.update(id, n -> {
             Task task=find(n, taskId);
             if (task.status == TaskStatus.RUNNING || task.status == TaskStatus.QUEUED) {
-                task.status=TaskStatus.CANCELLED; task.finishedAt=Novel.now();
+                task.status=TaskStatus.CANCELLED; task.progressStage="CANCELLED"; task.finishedAt=Novel.now();
                 n.agentRuns.stream().filter(run->task.id.equals(run.taskId) && run.status==AgentRunStatus.RUNNING)
                         .forEach(run->transitionAgentRun(run,AgentRunStatus.CANCELLED,null,null,"任务由用户取消"));
             }
@@ -701,14 +948,24 @@ public class TaskService {
                 old.summaryOnly,old.automationKind,old.automationRound);
     }
     public Task find(Novel n, String id) { return n.tasks.stream().filter(t -> t.id.equals(id)).findFirst().orElseThrow(() -> new Problem(404, "任务不属于该小说或不存在")); }
-    @EventListener(ApplicationReadyEvent.class)
+    @EventListener(ApplicationStartedEvent.class)
     public void recover() {
         for (Novel n : repository.list()) repository.update(n.id, current -> {
             if (current.agentRuns==null) current.agentRuns=new ArrayList<>();
             if (current.shadowReviews==null) current.shadowReviews=new ArrayList<>();
             outlinePipelines.ensure(current);
+            current.agentRuns.stream().filter(run->AgentRole.STATE_EXTRACTOR.name().equals(run.role)
+                    && run.status==AgentRunStatus.RUNNING && run.inputVersionId!=null).forEach(run->{
+                current.artifacts.stream().flatMap(artifact->artifact.versions.stream())
+                        .filter(version->run.inputVersionId.equals(version.id)).findFirst().ifPresent(version->{
+                            version.stateExtractionRequired=true;
+                            version.stateExtractionStatus=StateExtractionStatus.FAILED;
+                            version.stateExtractionAgentRunId=run.id;
+                            version.stateExtractionError="服务重启导致状态提取中断；正文草稿和内容检查均已保留，可以只重试状态提取";
+                        });
+            });
             current.tasks.stream().filter(t -> t.status == TaskStatus.RUNNING || t.status == TaskStatus.QUEUED).forEach(t -> {
-                t.status=TaskStatus.INTERRUPTED; t.finishedAt=Novel.now(); t.error="服务重启导致任务中断；请手动重试，避免自动重复计费";
+                t.status=TaskStatus.INTERRUPTED; t.progressStage="INTERRUPTED"; t.finishedAt=Novel.now(); t.error="服务重启导致任务中断；请手动重试，避免自动重复计费";
                 current.agentRuns.stream().filter(run->t.id.equals(run.taskId) && run.status==AgentRunStatus.RUNNING)
                         .forEach(run->transitionAgentRun(run,AgentRunStatus.INTERRUPTED,null,null,t.error));
             });

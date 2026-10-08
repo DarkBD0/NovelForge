@@ -90,7 +90,7 @@ public class ProfessionalReviewPolicy {
             JsonNode root=mapper.readTree(request.context().json());
             StringBuilder text=new StringBuilder();
             for (String field:List.of("title","synopsis","requirements","canonBeforeChapter","currentChapterPlan",
-                    "chapterBrief","acceptedReferences","planningState","stateModel"))
+                    "chapterBrief","acceptedReferences","formalStructuredMemory","planningState","stateModel"))
                 appendText(root.get(field),text);
             return text.toString();
         } catch (Exception ignored) { return ""; }

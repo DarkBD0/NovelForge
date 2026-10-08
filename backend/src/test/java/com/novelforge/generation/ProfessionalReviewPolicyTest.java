@@ -64,6 +64,15 @@ class ProfessionalReviewPolicyTest {
         assertThat(result.issueDetails()).isEmpty();
     }
 
+    @Test void recognizesStructuredMemoryAsGroundedAuthority() {
+        ReviewIssue issue=issue("候选原文：“陈默保存储存卡”｜已确认依据：“储存卡由周海保管”","作者决定");
+        String json="{\"formalStructuredMemory\":{\"relations\":[{\"detail\":\"储存卡由周海保管\"}]}}";
+        ModelGateway.Request structured=new ModelGateway.Request(Action.REVIEW,new Novel(),null,
+                new ContextAssembler.Context(json,List.of(),2,1),"");
+        Review result=policy.normalize(review(issue),candidate("陈默保存储存卡。"),structured,null);
+        assertThat(result.issueDetails()).singleElement().extracting(ReviewIssue::severity).isEqualTo("作者决定");
+    }
+
     private ReviewIssue issue(String evidence,String severity) {
         return new ReviewIssue("储存卡段落","储存卡状态与已确认事实冲突",evidence,"统一储存卡状态",severity);
     }

@@ -5,6 +5,7 @@ import com.novelforge.novel.Novel;
 import com.novelforge.novel.Novel.*;
 import com.novelforge.novel.WordCounter;
 import com.novelforge.generation.ModelGateway;
+import com.novelforge.generation.StateExtractionPolicy;
 import com.novelforge.outline.OutlineSpec;
 import com.novelforge.outline.OutlineStructureService;
 import com.novelforge.revision.ImpactAnalyzer;
@@ -20,10 +21,12 @@ public class WorkflowService {
     private final WordCounter counter;
     private final ImpactAnalyzer impact;
     private final OutlineStructureService outlineStructures;
+    private final StateExtractionPolicy stateExtractions;
     public WorkflowService(NovelRepository repository, WorkflowRules rules, WordCounter counter, ImpactAnalyzer impact,
-                           OutlineStructureService outlineStructures) {
+                           OutlineStructureService outlineStructures,StateExtractionPolicy stateExtractions) {
         this.repository=repository; this.rules=rules; this.counter=counter; this.impact=impact;
         this.outlineStructures=outlineStructures;
+        this.stateExtractions=stateExtractions;
     }
     public Novel create(String title, String synopsis, long target, String requirements) {
         Novel n = new Novel(); n.title=title.strip(); n.synopsis=synopsis.strip();
@@ -55,11 +58,29 @@ public class WorkflowService {
             require(rules.reviewCurrent(n,v), "请先针对当前版本与依据执行检查");
             require(v.review.passed() || (overrideReason != null && overrideReason.strip().length() >= 5), "检查存在问题；请修订，或明确填写人工复核接受理由（至少5字符）");
             if (a.kind == Kind.CHAPTER) {
+                require(!v.stateExtractionRequired || stateExtractions.current(v),
+                        "当前正文的独立状态提取尚未完成或已经过期；正文草稿仍然保留，请只重试状态提取后再确认");
                 long projected = counter.approvedWords(n) - (a.approved() == null ? 0 : counter.count(a.approved().content)) + counter.count(v.content);
                 require(projected <= n.approvedMaxWords, "确认后将超过已批准字数上限，请先修订正文或批准扩充预算");
             }
             a.approvedVersionId=v.id; a.needsRevision=false; n.revision++;
             n.approvals.add(new Approval(a.id, v.id, n.revision, overrideReason, Novel.now()));
+            return n;
+        });
+    }
+    public Novel dismissCandidate(String id,String artifactId,String versionId,long revision) {
+        return repository.update(id,n->{
+            expected(n,revision); idle(n);
+            Artifact artifact=rules.artifact(n,artifactId);
+            Version latest=artifact.latest();
+            require(latest!=null && latest.id.equals(versionId),"只能放弃当前最新候选版本");
+            require(!versionId.equals(artifact.approvedVersionId),"已确认版本不能放弃");
+            int sourceIndex=n.artifacts.indexOf(artifact);
+            require(n.artifacts.subList(sourceIndex+1,n.artifacts.size()).stream().noneMatch(item->item.needsRevision),
+                    "这次修改已经影响后续内容，暂不能一键放弃；请先处理关联版本或通过历史版本重新建立草稿");
+            latest.dismissed=true; latest.dismissedAt=Novel.now();
+            artifact.needsRevision=latest.previousNeedsRevision;
+            n.revision++;
             return n;
         });
     }
@@ -76,6 +97,10 @@ public class WorkflowService {
                     "内容没有发生变化，无需创建新版本或重新检查");
             Version v = new Version(); v.baseVersionId=a.latest().id; v.title=edit.title(); v.content=edit.content();
             v.summary=edit.summary(); v.facts=edit.facts(); v.plan=edit.plan(); v.source="USER"; v.basedOnRevision=n.revision;
+            if(a.kind==Kind.CHAPTER) {
+                v.facts=List.of();
+                v.stateExtractionRequired=true; v.stateExtractionStatus=StateExtractionStatus.PENDING;
+            }
             v.outlineSpec=a.latest().outlineSpec; v.outlineSpecHash=a.latest().outlineSpecHash;
             rules.validateVersion(n, a, v);
             impact.invalidateFollowing(n, a, edit.reason());

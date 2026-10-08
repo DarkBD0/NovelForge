@@ -7,6 +7,7 @@ import com.novelforge.novel.Novel.*;
 import com.novelforge.novel.WordCounter;
 import com.novelforge.shared.Problem;
 import com.novelforge.workflow.WorkflowRules;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import java.util.*;
@@ -20,16 +21,34 @@ public class ContextAssembler {
     private final WordCounter words;
     private final ObjectMapper mapper;
     private final int maxChars;
+    private RetrievalContextService retrievalContexts;
     public ContextAssembler(CanonService canon, WorkflowRules rules, WordCounter words, ObjectMapper mapper,
                             @Value("${novelforge.model.max-context-chars}") int maxChars) {
         this.canon = canon; this.rules = rules; this.words = words; this.mapper = mapper; this.maxChars = maxChars;
     }
+    @Autowired void setRetrievalContexts(RetrievalContextService retrievalContexts) {
+        this.retrievalContexts=retrievalContexts;
+    }
     public Context assemble(Novel n, Action action, String artifactId) {
+        return assemble(n,action,artifactId,null);
+    }
+    public Context assemble(Novel n, Action action, String artifactId, ConversationBrief conversationBrief) {
         Artifact target = artifactId == null ? null : rules.artifact(n, artifactId);
         int chapter = target != null && target.kind == Kind.CHAPTER ? target.chapterNumber : rules.nextChapter(n);
         int batch = target != null && target.kind == Kind.PLAN ? target.batchNumber : rules.plans(n).size() + 1;
         var root = new LinkedHashMap<String, Object>();
         root.put("title", n.title); root.put("synopsis", n.synopsis); root.put("requirements", n.requirements);
+        if (conversationBrief!=null) {
+            root.put("conversationBrief",Map.of(
+                    "id",conversationBrief.id,
+                    "scope",conversationBrief.scope,
+                    "baseRevision",conversationBrief.baseRevision,
+                    "baseVersionId",conversationBrief.baseVersionId==null?"":conversationBrief.baseVersionId,
+                    "acceptedDecisionIds",List.copyOf(conversationBrief.acceptedDecisionIds),
+                    "acceptedDecisions",List.copyOf(conversationBrief.acceptedDecisions),
+                    "hash",conversationBrief.hash,
+                    "authority","AUTHOR_ACCEPTED_INTENT_NOT_CANON"));
+        }
         root.put("targetWords", n.targetWords); root.put("approvedMaxWords", n.approvedMaxWords);
         root.put("confirmedWords", words.approvedWords(n)); root.put("nextChapter", chapter); root.put("nextBatch", batch);
         int confirmedThrough=Math.max(0,rules.nextChapter(n)-1);
@@ -119,6 +138,17 @@ public class ContextAssembler {
             accepted.add(item); ids.add(v.id);
         }
         root.put("acceptedReferences", accepted);
+        if (retrievalContexts!=null && retrievalEligible(action,target)) {
+            RetrievalContextService.Result retrieved=retrievalContexts.retrieve(n,chapter,retrievalQuery(root,target));
+            if (retrieved!=null) {
+                var retrieval=new LinkedHashMap<String,Object>();
+                retrieval.put("status",retrieved.status()); retrieval.put("runId",retrieved.runId());
+                retrieval.put("query",retrieved.query()); retrieval.put("beforeChapter",chapter);
+                retrieval.put("authorityState","CONFIRMED_RETRIEVAL_AID"); retrieval.put("note",retrieved.note());
+                retrieval.put("hits",retrieved.hits()); root.put("retrievedConfirmedHistory",retrieval);
+                for(String sourceVersionId:retrieved.sourceVersionIds()) if(!ids.contains(sourceVersionId)) ids.add(sourceVersionId);
+            }
+        }
         if (target != null) {
             Version v=target.latest();
             var revisionTarget=new LinkedHashMap<String,Object>();
@@ -141,6 +171,28 @@ public class ContextAssembler {
             if (json.length() > maxChars) throw new Problem(409, "上下文超过配置容量，任务已停止且未截断关键设定；请提高上下文额度或精简已确认摘要");
             return new Context(json, ids, chapter, batch);
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) { throw new IllegalStateException(e); }
+    }
+
+    private static boolean retrievalEligible(Action action,Artifact target) {
+        if(action==Action.CHAPTER) return true;
+        return target!=null && target.kind==Kind.CHAPTER && List.of(Action.REWRITE,Action.REVIEW).contains(action);
+    }
+
+    private static String retrievalQuery(Map<String,Object> root,Artifact target) {
+        List<String> parts=new ArrayList<>();
+        Object plan=root.get("currentChapterPlan");
+        if(plan instanceof Map<?,?> map) {
+            add(parts,map.get("title")); add(parts,map.get("purpose"));
+        }
+        if(target!=null && target.latest()!=null) {
+            add(parts,target.latest().title); add(parts,target.latest().summary);
+        }
+        add(parts,root.get("previousChapterSummary"));
+        return String.join("。",new LinkedHashSet<>(parts));
+    }
+
+    private static void add(List<String> parts,Object value) {
+        if(value!=null && !value.toString().isBlank()) parts.add(value.toString().strip());
     }
 
     private ChapterBudget chapterBudget(Novel n,Action action,Artifact target,int chapter,ChapterBeat beat) {

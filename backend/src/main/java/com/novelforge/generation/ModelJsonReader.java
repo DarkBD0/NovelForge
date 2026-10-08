@@ -16,6 +16,7 @@ import java.util.List;
 
 /** Tolerate presentation wrappers and recoverable metadata omissions, never salvage nested/partial JSON. */
 final class ModelJsonReader {
+    static final int MAX_PATCH_OPERATIONS=100;
     private final ObjectMapper mapper;
     ModelJsonReader(ObjectMapper mapper) { this.mapper=mapper; }
 
@@ -47,7 +48,7 @@ final class ModelJsonReader {
                 normalizePatchPlanNumbers(node);
                 validatePatch(node);
             } else if (type == ModelGateway.Generated.class) {
-                strings(node, "title", "content");
+                strings(node, "title");
                 List<String> draftIssues=new ArrayList<>();
                 JsonNode summaryNode=node.path("summary");
                 String summary=summaryNode.isTextual()?summaryNode.textValue():"";
@@ -65,10 +66,64 @@ final class ModelJsonReader {
                 List<Fact> facts=new ArrayList<>();
                 if (factsNode.isArray()) for (JsonNode fact : factsNode) facts.add(mapper.treeToValue(fact,Fact.class));
                 Plan plan=node.path("plan").isObject()?mapper.treeToValue(node.path("plan"),Plan.class):null;
+                String content=node.path("content").isTextual()?node.path("content").textValue():"";
+                if (content.isBlank() && plan!=null) content=renderPlan(plan);
+                require(!content.isBlank(),"content 必须是非空文本");
                 OutlineSpec outlineSpec=node.path("outlineSpec").isObject()
                         ?mapper.treeToValue(node.path("outlineSpec"),OutlineSpec.class):null;
-                return type.cast(new ModelGateway.Generated(node.path("title").textValue(),node.path("content").textValue(),
+                return type.cast(new ModelGateway.Generated(node.path("title").textValue(),content,
                         summary,facts,plan,outlineSpec,draftIssues));
+            } else if (type == ModelGateway.StateExtraction.class) {
+                require(node.path("facts").isArray(),"facts 必须是数组（没有状态变化时使用 []）");
+                for(JsonNode fact:node.path("facts")) {
+                    strings(fact,"key","type","detail","state");
+                    require(fact.path("evidenceQuotes").isArray() && !fact.path("evidenceQuotes").isEmpty(),
+                            "每条状态必须提供非空 evidenceQuotes 数组");
+                    for(JsonNode quote:fact.path("evidenceQuotes"))
+                        require(quote.isTextual() && !quote.asText().isBlank(),"evidenceQuotes 必须是非空文本");
+                }
+                JsonNode entities=node.path("entities");
+                require(entities.isMissingNode()||entities.isArray(),"entities 必须是数组（没有实体时使用 []）");
+                if(entities.isArray()) for(JsonNode entity:entities) {
+                    strings(entity,"key","type","name","description");
+                    require(entity.path("aliases").isArray(),"实体 aliases 必须是数组");
+                    for(JsonNode alias:entity.path("aliases"))
+                        require(alias.isTextual()&&!alias.asText().isBlank(),"实体 aliases 只能包含非空文本");
+                    require(entity.path("evidenceQuotes").isArray()&&!entity.path("evidenceQuotes").isEmpty(),
+                            "每个实体必须提供非空 evidenceQuotes 数组");
+                }
+                JsonNode relations=node.path("relations");
+                require(relations.isMissingNode()||relations.isArray(),"relations 必须是数组（没有关系时使用 []）");
+                if(relations.isArray()) for(JsonNode relation:relations) {
+                    strings(relation,"key","fromEntityKey","type","toEntityKey","detail","state");
+                    require(relation.path("evidenceQuotes").isArray()&&!relation.path("evidenceQuotes").isEmpty(),
+                            "每条关系必须提供非空 evidenceQuotes 数组");
+                }
+            } else if (type == ModelGateway.DialogueResponse.class) {
+                strings(node,"reply");
+                require(node.path("decisionCandidates").isArray(),"decisionCandidates 必须是数组");
+                for (JsonNode decision:node.path("decisionCandidates")) {
+                    strings(decision,"type","text");
+                    require(List.of("MUST_KEEP","MUST_CHANGE","FORBID","PREFERENCE","OPEN_QUESTION","ASSUMPTION")
+                                    .contains(decision.path("type").asText()),
+                            "decisionCandidates.type 不受支持");
+                }
+                JsonNode projectUpdates=node.path("projectUpdateCandidates");
+                require(projectUpdates.isMissingNode()||projectUpdates.isArray(),"projectUpdateCandidates 必须是数组");
+                if (projectUpdates.isArray()) for (JsonNode update:projectUpdates) {
+                    strings(update,"field","proposedValue","reason");
+                    require(List.of("TITLE","SYNOPSIS","REQUIREMENTS","TARGET_WORDS")
+                                    .contains(update.path("field").asText()),
+                            "projectUpdateCandidates.field 不受支持");
+                }
+                JsonNode proposal=node.path("actionProposal");
+                require(proposal.isNull() || proposal.isMissingNode() || proposal.isObject(),
+                        "actionProposal 必须是对象或 null");
+                if (proposal.isObject()) {
+                    strings(proposal,"operation","instructions");
+                    require("GENERATE_OR_REVISE_OUTLINE".equals(proposal.path("operation").asText()),
+                            "actionProposal.operation 不受支持");
+                }
             } else {
                 throw error("本地模型结果类型未配置解析规则");
             }
@@ -92,7 +147,7 @@ final class ModelJsonReader {
 
     private void validatePatch(JsonNode node) {
         require(node.path("operations").isArray() && !node.path("operations").isEmpty(), "operations 必须是非空数组");
-        require(node.path("operations").size()<=50,"operations 最多五十项");
+        require(node.path("operations").size()<=MAX_PATCH_OPERATIONS,"operations 最多一百项");
         for (JsonNode operation : node.path("operations")) {
             strings(operation,"op");
             switch(operation.path("op").asText()) {
@@ -288,6 +343,26 @@ final class ModelJsonReader {
                 if (chapter.has(field) && !chapter.path(field).isNull())
                     require(chapter.path(field).isTextual(),"章节 "+field+" 必须是文本");
         }
+    }
+    private String renderPlan(Plan plan) {
+        StringBuilder text=new StringBuilder("第").append(plan.startChapter).append("章至第")
+                .append(plan.endChapter).append("章章节规划");
+        for (var chapter:plan.chapters) {
+            text.append("\n\n第").append(chapter.number()).append("章 ").append(chapter.title())
+                    .append("\n核心变化：").append(chapter.purpose());
+            if (chapter.targetWords()!=null) text.append("\n建议字数：").append(chapter.targetWords()).append("字");
+            if (!chapter.sceneBeats().isEmpty()) {
+                text.append("\n场景节点：");
+                for (int i=0;i<chapter.sceneBeats().size();i++)
+                    text.append("\n").append(i+1).append(". ").append(chapter.sceneBeats().get(i));
+            }
+            if (!chapter.revealBoundary().isBlank()) text.append("\n揭示边界：").append(chapter.revealBoundary());
+            if (!chapter.endingHook().isBlank()) text.append("\n章末局面：").append(chapter.endingHook());
+        }
+        text.append("\n\n批次衔接：").append(plan.handoff);
+        if (!plan.triggerReason.isBlank()) text.append("\n下一批触发：").append(plan.triggerReason);
+        if (!plan.assumptions.isBlank()) text.append("\n待复核假设：").append(plan.assumptions);
+        return text.toString();
     }
     private void strings(JsonNode node, String... fields) {
         for (String field : fields)

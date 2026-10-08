@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.ArrayList;
 import java.time.Duration;
 import static org.assertj.core.api.Assertions.*;
 
@@ -136,7 +137,7 @@ class HttpModelGatewayTest {
         assertThat(mapper.readTree(received.get()).has("response_format")).isFalse();
         assertThat(mapper.readTree(received.get()).path("messages").path(0).path("content").asText())
                 .contains("不得把正文剧情顺序重复写进人物档案", "同一事实只能有一个权威条目",
-                        "必须逐条扫描返回的 facts 并真正删除或改写这些表述");
+                        "CHAPTER 的 facts 必须返回 []", "独立状态提取 Agent");
         reply(new Review(true,List.of(),true,true,true),"stop");
         assertThat(gateway.review(request(),null).endingClear()).isTrue();
         assertThat(mapper.readTree(received.get()).path("messages").path(0).path("content").asText())
@@ -144,6 +145,81 @@ class HttpModelGatewayTest {
                         "同一事件使用同义表达","不要要求摘要、伏笔清单和详细正文逐字一致",
                         "忽略同一句后半段","满足其中一个选项即为满足",
                         "初体验","不得强迫本章明确命名","正文比规划更具体");
+    }
+
+    @Test void stateExtractionUsesDedicatedEvidenceContractWithoutThinking() throws Exception {
+        var extraction=new ModelGateway.StateExtraction(List.of(new ModelGateway.ExtractedState(
+                "event_key_handoff","EVENT","陈默把钥匙交给林秋","ACTIVE",List.of("陈默把钥匙交给林秋"))));
+        reply(extraction,"stop");
+
+        ModelGateway.StateExtraction result=gateway().extractState(chapterRequest(),
+                new ModelGateway.Generated("第一章","陈默把钥匙交给林秋。","钥匙完成交接",List.of(),null));
+
+        assertThat(result).isEqualTo(extraction);
+        JsonNode body=mapper.readTree(received.get());
+        assertThat(body.has("thinking")).isFalse();
+        assertThat(body.path("messages").get(0).path("content").asText())
+                .contains("状态提取 Agent","candidate.content 是唯一允许证明","逐字复制","没有值得长期保存");
+        assertThat(body.path("messages").get(1).path("content").asText())
+                .contains("陈默把钥匙交给林秋","candidate");
+    }
+    @Test void dialogueUsesDedicatedNonThinkingJsonContract() throws Exception {
+        var responseValue=new ModelGateway.DialogueResponse("可以先确定主角为何主动调查。",
+                List.of(new ModelGateway.DialogueDecision("MUST_CHANGE","主角应主动卷入事件")),
+                List.of(new ModelGateway.ProjectUpdateCandidate("TITLE","雨夜失踪者","更贴合案件主线")),
+                new ModelGateway.DialogueProposal("GENERATE_OR_REVISE_OUTLINE","按已采纳决定修订大纲"));
+        reply(responseValue,"stop");
+        ModelGateway.DialogueResponse result=gateway().dialogue(new ModelGateway.DialogueRequest(
+                "{\"scope\":\"OUTLINE\",\"latestUserMessage\":\"主角需要更主动\"}"));
+        assertThat(result.reply()).contains("主角");
+        assertThat(result.decisionCandidates()).singleElement().satisfies(item->{
+            assertThat(item.type()).isEqualTo("MUST_CHANGE");
+            assertThat(item.text()).contains("主动");
+        });
+        assertThat(result.projectUpdateCandidates()).singleElement().satisfies(item->{
+            assertThat(item.field()).isEqualTo("TITLE");
+            assertThat(item.proposedValue()).isEqualTo("雨夜失踪者");
+        });
+        JsonNode body=mapper.readTree(received.get());
+        assertThat(body.path("messages").get(0).path("content").asText())
+                .contains("不能直接修改大纲","只有用户逐项采纳","projectUpdateCandidates","完整值");
+        assertThat(body.path("messages").get(1).path("content").asText()).contains("latestUserMessage");
+        assertThat(body.has("thinking")).isFalse();
+
+        reply(Map.of("reply","本轮只讨论，不修改项目信息","decisionCandidates",List.of()),"stop");
+        assertThat(gateway().dialogue(new ModelGateway.DialogueRequest("{}"))
+                .projectUpdateCandidates()).isEmpty();
+
+        reply(Map.of("reply","错误类型","decisionCandidates",List.of(Map.of("type","UNKNOWN","text","错误")),
+                "projectUpdateCandidates",List.of()),"stop");
+        assertThatThrownBy(()->gateway().dialogue(new ModelGateway.DialogueRequest("{}")))
+                .hasMessageContaining("type 不受支持");
+    }
+    @Test void dialogueStreamsOnlyTheReadableReplyAndStillValidatesTheWholeJson() throws Exception {
+        var responseValue=new ModelGateway.DialogueResponse("先确定主角。\n再设计结局。",
+                List.of(new ModelGateway.DialogueDecision("MUST_KEEP","结局必须明确")),List.of(),null);
+        String json=mapper.writeValueAsString(responseValue);
+        int first=json.indexOf("\\n")+1,second=Math.min(json.length(),first+9);
+        List<String> chunks=List.of(json.substring(0,first),json.substring(first,second),json.substring(second));
+        StringBuilder sse=new StringBuilder();
+        for(String chunk:chunks) sse.append("data: ").append(mapper.writeValueAsString(Map.of("choices",List.of(
+                Map.of("index",0,"delta",Map.of("content",chunk)))))).append("\n\n");
+        sse.append("data: ").append(mapper.writeValueAsString(Map.of("choices",List.of(
+                Map.of("index",0,"delta",Map.of(),"finish_reason","stop"))))).append("\n\n");
+        sse.append("data: [DONE]\n\n");
+        response.set(sse.toString());contentType.set("text/event-stream");
+        List<String> stages=new ArrayList<>();StringBuilder visible=new StringBuilder();
+        ModelGateway.DialogueStream stream=new ModelGateway.DialogueStream() {
+            public void stage(String stage){stages.add(stage);} public void text(String delta){visible.append(delta);}
+            public boolean cancelled(){return false;}
+        };
+
+        ModelGateway.DialogueResponse result=gateway().dialogue(new ModelGateway.DialogueRequest("{}"),stream);
+
+        assertThat(result).isEqualTo(responseValue);
+        assertThat(visible.toString()).isEqualTo(responseValue.reply()).doesNotContain("decisionCandidates","reply");
+        assertThat(stages).containsSubsequence("CONNECTING","GENERATING","FINALIZING");
+        assertThat(mapper.readTree(received.get()).path("stream").asBoolean()).isTrue();
     }
     @Test void refusesTruncatedOrInvalidOutputWithoutFallingBackToDemo() throws Exception {
         var gateway=gateway();

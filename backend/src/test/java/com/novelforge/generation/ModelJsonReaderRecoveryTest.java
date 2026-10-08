@@ -4,6 +4,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.novelforge.shared.Problem;
 import org.junit.jupiter.api.Test;
 
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -39,5 +42,36 @@ class ModelJsonReaderRecoveryTest {
                 .isInstanceOf(Problem.class).hasMessageContaining("无法唯一确定");
         assertThatThrownBy(()->reader.read(valid+"\n"+valid,RewritePatch.class))
                 .isInstanceOf(Problem.class).hasMessageContaining("多个 JSON 片段");
+    }
+
+    @Test void acceptsLargeAtomicFactSplitButKeepsABoundedPatch() {
+        String maximum=IntStream.range(0,ModelJsonReader.MAX_PATCH_OPERATIONS)
+                .mapToObj(index->"{\"op\":\"DELETE_FACT\",\"key\":\"fact_"+index+"\"}")
+                .collect(Collectors.joining(",","{\"operations\":[","]}"));
+        assertThat(reader.read(maximum,RewritePatch.class).operations())
+                .hasSize(ModelJsonReader.MAX_PATCH_OPERATIONS);
+
+        String tooMany=IntStream.rangeClosed(0,ModelJsonReader.MAX_PATCH_OPERATIONS)
+                .mapToObj(index->"{\"op\":\"DELETE_FACT\",\"key\":\"fact_"+index+"\"}")
+                .collect(Collectors.joining(",","{\"operations\":[","]}"));
+        assertThatThrownBy(()->reader.read(tooMany,RewritePatch.class))
+                .isInstanceOf(Problem.class).hasMessageContaining("最多一百项");
+    }
+
+    @Test void rendersReadablePlanContentWhenProviderLeavesGenericContentEmpty() {
+        String json="""
+                {"title":"第一批章节规划","content":"","summary":"开篇建立委托关系","facts":[],
+                 "plan":{"startChapter":1,"endChapter":1,"prepareNextAfterChapter":1,"finalBatch":true,
+                   "triggerReason":"单章短篇无需下一批","handoff":"本章完成故事","assumptions":"",
+                   "chapters":[{"number":1,"title":"钥匙","purpose":"周岚委托林澈调查旧站台",
+                     "targetWords":1200,"sceneBeats":["周岚交付钥匙"],"revealBoundary":"不提前揭示真相",
+                     "endingHook":"林澈进入旧站台"}]},"outlineSpec":null}
+                """;
+
+        ModelGateway.Generated generated=reader.read(json,ModelGateway.Generated.class);
+
+        assertThat(generated.content()).contains("第1章至第1章章节规划","周岚委托林澈调查旧站台",
+                "场景节点：","批次衔接：本章完成故事");
+        assertThat(generated.plan()).isNotNull();
     }
 }

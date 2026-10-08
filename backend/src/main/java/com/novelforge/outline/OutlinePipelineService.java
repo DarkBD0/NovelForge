@@ -101,10 +101,14 @@ public class OutlinePipelineService {
 
     public void saveCandidate(String novelId,String workspaceId,String artifactId,String versionId) {
         repository.update(novelId,n->{
-            OutlinePipelineWorkspace workspace=find(n,workspaceId);
-            workspace.artifactId=artifactId; workspace.versionId=versionId; workspace.currentStep="CANDIDATE_SAVED";
+            saveCandidate(n,workspaceId,artifactId,versionId);
             return null;
         });
+    }
+
+    public void saveCandidate(Novel novel,String workspaceId,String artifactId,String versionId) {
+        OutlinePipelineWorkspace workspace=find(novel,workspaceId);
+        workspace.artifactId=artifactId; workspace.versionId=versionId; workspace.currentStep="CANDIDATE_SAVED";
     }
 
     public void saveAudit(String novelId,String workspaceId,String step,Review review) {
@@ -178,15 +182,25 @@ public class OutlinePipelineService {
 
     public void complete(String novelId,String workspaceId,Review combined) {
         repository.update(novelId,n->{
-            OutlinePipelineWorkspace workspace=find(n,workspaceId);
-            workspace.combinedReview=combined; workspace.status=OutlinePipelineStatus.SUCCEEDED;
-            workspace.currentStep="COMPLETED"; workspace.finishedAt=Novel.now(); workspace.error=null;
+            complete(n,workspaceId,combined);
             return null;
         });
     }
 
+    public void complete(Novel novel,String workspaceId,Review combined) {
+        OutlinePipelineWorkspace workspace=find(novel,workspaceId);
+        workspace.combinedReview=combined; workspace.status=OutlinePipelineStatus.SUCCEEDED;
+        workspace.currentStep="COMPLETED"; workspace.finishedAt=Novel.now(); workspace.error=null;
+    }
+
     public void needsInput(String novelId,String workspaceId,String error) {
         finish(novelId,workspaceId,OutlinePipelineStatus.NEEDS_INPUT,error);
+    }
+
+    public void needsInput(Novel novel,String workspaceId,String error) {
+        OutlinePipelineWorkspace workspace=find(novel,workspaceId);
+        workspace.status=OutlinePipelineStatus.NEEDS_INPUT; workspace.currentStep="NEEDS_INPUT";
+        workspace.finishedAt=Novel.now(); workspace.error=error;
     }
 
     public void stop(String novelId,String workspaceId,OutlinePipelineStatus status,String error) {

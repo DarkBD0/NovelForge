@@ -9,9 +9,11 @@
 3. 新增或替换一条档案：{"op":"UPSERT_FACT","fact":{"key":"沿用原 key；新增时创建稳定 key","type":"CHARACTER|WORLD|TIMELINE|EVENT|FORESHADOW","detail":"完整中文描述","state":"ACTIVE|OPEN|RESOLVED"}}
 4. 删除档案：{"op":"DELETE_FACT","key":"原内部编号"}
 5. 仅修订章节规划时替换结构化规划：{"op":"SET_PLAN","plan":{"startChapter":1,"endChapter":30,"prepareNextAfterChapter":25,"finalBatch":false,"triggerReason":"...","handoff":"...","assumptions":"...","chapters":[{"number":1,"title":"...","purpose":"..."}]}}
-6. 只有当当前目标是章节且作者明确要求整章重写时，才可返回 {"op":"SET_CONTENT","value":"重写后的完整章节正文"}，并同时用 SET_FIELD 更新完整摘要、用 {"op":"REPLACE_FACTS","facts":[...]} 替换本章完整档案增量。整章重写章节时 operations 只能包含 SET_CONTENT、设置 title/summary 的 SET_FIELD 和 REPLACE_FACTS，绝对不要返回 SET_PLAN；currentChapterPlan 是只读写作依据，不是本次修改目标。其他内容类型或局部修改禁止使用 SET_CONTENT 和 REPLACE_FACTS。
+6. 只有当当前目标是章节且作者明确要求整章重写时，才可返回 {"op":"SET_CONTENT","value":"重写后的完整章节正文"}，并同时用 SET_FIELD 更新完整摘要。整章重写章节时 operations 只能包含 SET_CONTENT 和设置 title/summary 的 SET_FIELD，绝对不要返回 SET_PLAN、UPSERT_FACT、DELETE_FACT 或 REPLACE_FACTS；章节事实由独立状态提取器在内容检查通过后从正文重建。currentChapterPlan 是只读写作依据，不是本次修改目标。其他内容类型或局部修改禁止使用 SET_CONTENT 和 REPLACE_FACTS。
 
-oldText 必须从 revisionTarget 对应字段逐字复制，并选择只出现一次的最短充分片段；不要模糊匹配。修改既出现在正文又出现在 facts 时，分别给出操作。人物设定的 facts 只保留身份、性格、能力边界、长期动机、稳定关系和世界规则；删除“第一次、初次、首次、随后、后来、第几章”等剧情顺序。每条 fact 只保留一个主体的一个动作或状态；复合档案使用 DELETE_FACT 配合多个 UPSERT_FACT 拆分，并为新增原子事实创建不同的稳定 key。若检查指出档案缺少正文依据，只删除、缩小或拆分档案声明，不得为了证明档案而向正文补写解释句；只有检查明确指出章节规划主事件缺失时，才修改正文补齐剧情。档案 detail 以及修改后的 title、content、summary 必须使用自然语言，不得写 finalBatch、prepareNextAfterChapter、candidate.facts、character_xxx 等内部字段、路径或编号，也不得把检查意见原文复制进去。正常题材确有需要时可以使用英文人名、术语或对白。operations 至少一项、最多五十项，只改 instructions 要求或上游变化真正影响的部分。
+章节正文的任何修订都不得操作 facts；下述“正文与 facts 分别修改”只适用于非章节内容。
+
+oldText 必须从 revisionTarget 对应字段逐字复制，并选择只出现一次的最短充分片段；不要模糊匹配。修改既出现在正文又出现在 facts 时，分别给出操作。人物设定的 facts 只保留身份、性格、能力边界、长期动机、稳定关系和世界规则；删除“第一次、初次、首次、随后、后来、第几章”等剧情顺序。每条 fact 只保留一个主体的一个动作或状态；复合档案使用 DELETE_FACT 配合多个 UPSERT_FACT 拆分，并为新增原子事实创建不同的稳定 key。若检查指出档案缺少正文依据，只删除、缩小或拆分档案声明，不得为了证明档案而向正文补写解释句；只有检查明确指出章节规划主事件缺失时，才修改正文补齐剧情。档案 detail 以及修改后的 title、content、summary 必须使用自然语言，不得写 finalBatch、prepareNextAfterChapter、candidate.facts、character_xxx 等内部字段、路径或编号，也不得把检查意见原文复制进去。正常题材确有需要时可以使用英文人名、术语或对白。operations 至少一项、最多一百项，只改 instructions 要求或上游变化真正影响的部分。若所需操作超过一百项，不要输出不完整清单，应缩小修改范围或保留未处理项供下一轮处理。
 
 正文修改不得加入“仅用于核对、供检查、为了证明、通过一致性检查”等机器说明，也不得用“不是另一份、没有再次移交”等句子专门向检查器证明未发生某事。若原文已有这类说明，应删除说明，把仍有后续价值的事实保留到 summary 或原子 facts；不得用另一种解释句替换它。
 

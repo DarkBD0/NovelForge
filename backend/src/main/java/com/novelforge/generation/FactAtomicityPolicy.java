@@ -13,7 +13,7 @@ import java.util.regex.Pattern;
 @Component
 public class FactAtomicityPolicy {
     private static final Pattern SENTENCE_BOUNDARY=Pattern.compile("[；;。]+");
-    private static final Pattern ACTION_JOINER=Pattern.compile("(?:，|,)?(?:并且|并|随后|后来|同时|继而|之后|然后|又)(?=[^，,；;。]{2,})");
+    private static final Pattern ACTION_JOINER=Pattern.compile("(?:(?:，|,)(?:并且|并|随后|后来|同时|继而|之后|然后|又)|(?:随后|后来|继而|之后|然后))(?=[^，,；;。]{2,})");
 
     public Review apply(ModelGateway.Generated candidate, Review review) {
         if (candidate==null || candidate.facts()==null) return review;

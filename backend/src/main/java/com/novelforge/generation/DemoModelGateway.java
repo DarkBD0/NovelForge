@@ -16,6 +16,38 @@ public class DemoModelGateway implements ModelGateway {
     public DemoModelGateway(WordCounter counter) { this.counter = counter; }
     public String mode() { return "demo"; }
     public boolean ready() { return true; }
+    public DialogueResponse dialogue(DialogueRequest request) {
+        boolean execute=request.contextJson().contains("[演示立即生成]")
+                ||request.contextJson().contains("立即生成大纲")||request.contextJson().contains("开始生成大纲");
+        List<ProjectUpdateCandidate> projectUpdates=request.contextJson().contains("[演示修改资料]")
+                ?List.of(
+                        new ProjectUpdateCandidate("TITLE","雨夜失踪者","按作者在对话中的明确要求调整书名"),
+                        new ProjectUpdateCandidate("SYNOPSIS","记者在连夜追查失踪案时，发现所有线索都指向自己遗忘的一晚。","完整替换作品简介"),
+                        new ProjectUpdateCandidate("REQUIREMENTS","悬疑主线完整，线索公平，结局明确。","整理作者的补充要求"),
+                        new ProjectUpdateCandidate("TARGET_WORDS","900","调整预期篇幅但不改变现有字数上限"))
+                :List.of();
+        return new DialogueResponse(
+                "可以先把你最在意的大纲方向固定下来。离线演示只验证对话、采纳和执行流程，不代表真实创作质量。",
+                List.of(new DialogueDecision("MUST_KEEP","大纲必须围绕书名、简介和作者已经明确的要求展开")),
+                projectUpdates,
+                execute&&projectUpdates.isEmpty()
+                        ?new DialogueProposal("GENERATE_OR_REVISE_OUTLINE","根据作者在本轮明确提出的要求生成或修订全书大纲")
+                        :null);
+    }
+    @Override public DialogueResponse dialogue(DialogueRequest request,DialogueStream stream) {
+        stream.stage("GENERATING");
+        DialogueResponse response=dialogue(request);
+        String reply=response.reply();
+        int first=Math.max(1,reply.length()/3),second=Math.max(first+1,reply.length()*2/3);
+        for (String part:List.of(reply.substring(0,first),reply.substring(first,second),reply.substring(second))) {
+            if (stream.cancelled()) throw new com.novelforge.shared.Problem(409,"[CANCELLED] 本次对话已停止");
+            stream.text(part);
+            try { Thread.sleep(60); }
+            catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new com.novelforge.shared.Problem(409,"[CANCELLED] 本次对话已停止"); }
+        }
+        stream.stage("FINALIZING");
+        return response;
+    }
     public Generated generate(Request r) {
         Kind kind = r.target() == null ? Kind.valueOf(r.action().name()) : r.target().kind;
         if (r.target() != null) {
@@ -149,5 +181,29 @@ public class DemoModelGateway implements ModelGateway {
             return new Review(true,List.of(issue.text()),false,false,false,List.of(issue));
         }
         return new Review(true,List.of(),false,false,false,List.of());
+    }
+
+    @Override public StateExtraction extractState(Request r,Generated g) {
+        String content=g==null||g.content()==null?"":g.content().strip();
+        if(content.isBlank()) return new StateExtraction(List.of());
+        int boundary=-1;
+        for(char marker:new char[]{'。','！','？','\n'}) {
+            int found=content.indexOf(marker);
+            if(found>=0 && (boundary<0 || found<boundary)) boundary=found;
+        }
+        String quote=content.substring(0,Math.min(content.length(),boundary<0?Math.min(80,content.length()):boundary+1)).strip();
+        int chapter=r.context()==null?0:r.context().chapterNumber();
+        List<ExtractedEntity> entities=List.of(); List<ExtractedRelation> relations=List.of();
+        if(content.contains("林深")&&content.contains("银色钥匙")&&content.contains("他把钥匙收进口袋。")) {
+            entities=List.of(
+                    new ExtractedEntity("character_lin_shen","CHARACTER","林深",List.of(),
+                            "在雨夜捡到银色钥匙的人",List.of("林深在雨夜捡到一把银色钥匙。")),
+                    new ExtractedEntity("item_silver_key","ITEM","银色钥匙",List.of("钥匙"),
+                            "林深在雨夜捡到并收起的钥匙",List.of("林深在雨夜捡到一把银色钥匙。")));
+            relations=List.of(new ExtractedRelation("relation_lin_shen_owns_silver_key","character_lin_shen",
+                    "OWNS","item_silver_key","林深持有银色钥匙","ACTIVE",List.of("他把钥匙收进口袋。")));
+        }
+        return new StateExtraction(List.of(new ExtractedState("demo_chapter_"+chapter+"_event","EVENT",
+                quote,"ACTIVE",List.of(quote))),entities,relations);
     }
 }

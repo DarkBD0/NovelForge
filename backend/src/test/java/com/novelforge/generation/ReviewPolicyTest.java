@@ -112,4 +112,48 @@ class ReviewPolicyTest {
             assertThat(result.suggestion()).doesNotContain("在正文补写");
         });
     }
+
+    @Test void removesOmissionFindingWhenTheSupposedlyMissingQuoteIsLiteralCurrentProse() {
+        var candidate=new ModelGateway.Generated("第三十章","林澈把铜钥匙放回桌面，说：‘到这里就结束了。’","摘要",List.of(),null);
+        var falsePositive=new ReviewIssue("第三十章正文","正文没有落实‘到这里就结束了’这一明确结局",
+                "检查器称结局句缺失","无需修改","必须修正");
+
+        Review normalized=policy.normalize(new Review(false,List.of(falsePositive.text()),false,false,false,
+                List.of(falsePositive)),candidate,null);
+
+        assertThat(normalized.passed()).isTrue();
+        assertThat(normalized.issueDetails()).isEmpty();
+    }
+
+    @Test void removesFindingThatTreatsAChapterPlanAsAnExhaustiveDetailList() {
+        var candidate=new ModelGateway.Generated("第一章","他路过早餐铺，随后进入旧站。","摘要",List.of(),null);
+        var detail=new ReviewIssue("第一章正文","早餐铺细节超出章节规划范围",
+                "章节规划未提及早餐铺","删除未规划细节","必须修正");
+
+        Review normalized=policy.normalize(new Review(false,List.of(detail.text()),false,false,false,List.of(detail)),candidate,null);
+
+        assertThat(normalized.passed()).isTrue();
+    }
+
+    @Test void keepsAnActualPlanConflictEvenWhenItAlsoMentionsUnplannedMaterial() {
+        var candidate=new ModelGateway.Generated("第一章","他提前说出了凶手姓名。","摘要",List.of(),null);
+        var conflict=new ReviewIssue("第一章正文","该揭示未在本章规划安排，并与揭示边界冲突",
+                "规划要求本章不得揭示凶手","删除提前揭示","必须修正");
+
+        Review normalized=policy.normalize(new Review(false,List.of(conflict.text()),false,false,false,List.of(conflict)),candidate,null);
+
+        assertThat(normalized.passed()).isFalse();
+        assertThat(normalized.issueDetails()).containsExactly(conflict);
+    }
+
+    @Test void negativeBoundaryNeedNotBeRestatedAsExplanatoryProse() {
+        var candidate=new ModelGateway.Generated("第一章","他推开旧站的门，里面一片漆黑。","摘要",List.of(),null);
+        var falsePositive=new ReviewIssue("第一章正文","正文未写出本章不会赋予主角超能力",
+                "规划边界是不赋予能力","补一句说明他没有获得能力","必须修正");
+
+        Review normalized=policy.normalize(new Review(false,List.of(falsePositive.text()),false,false,false,
+                List.of(falsePositive)),candidate,null);
+
+        assertThat(normalized.passed()).isTrue();
+    }
 }

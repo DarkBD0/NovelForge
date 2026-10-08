@@ -7,6 +7,7 @@ package com.novelforge.generation;
  * workflow, persist content or invoke another role.</p>
  */
 public enum AgentRole {
+    CREATIVE_DIALOGUE,
     STORY_ARCHITECT,
     CHARACTER_WORLD_DESIGNER,
     ROLLING_PLANNER,
@@ -17,5 +18,6 @@ public enum AgentRole {
     CONTINUITY_AUDITOR,
     PLOT_FORESHADOW_AUDITOR,
     STYLE_AUDITOR,
+    STATE_EXTRACTOR,
     COMPLETION_AUDITOR
 }

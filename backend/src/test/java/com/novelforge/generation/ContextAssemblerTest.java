@@ -5,10 +5,14 @@ import com.novelforge.canon.CanonService;
 import com.novelforge.novel.Novel;
 import com.novelforge.novel.Novel.*;
 import com.novelforge.novel.WordCounter;
+import com.novelforge.projection.ElasticsearchShadowSearchService;
 import com.novelforge.workflow.WorkflowRules;
 import org.junit.jupiter.api.Test;
 import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class ContextAssemblerTest {
     @Test void keepsPunctuationInsideChineseQuotesInOneAcceptanceItem() {
@@ -37,6 +41,28 @@ class ContextAssemblerTest {
         assertThat(json.path("revisionTarget").path("authorityState").asText()).isEqualTo("UNCONFIRMED_CANDIDATE");
         assertThat(json.path("revisionTarget").path("temporalState").asText()).isEqualTo("FUTURE_CONDITIONAL_DESIGN");
         assertThat(json.path("acceptedReferences").get(0).path("temporalState").asText()).isEqualTo("OCCURRED");
+    }
+
+    @Test void addsVerifiedRetrievalToChapterWorkButNotStyleReview() throws Exception {
+        ObjectMapper mapper=new ObjectMapper(); WordCounter words=new WordCounter(); WorkflowRules rules=new WorkflowRules(words);
+        Novel novel=new Novel(); novel.title="检索上下文"; novel.synopsis="验证"; novel.targetWords=10000; novel.approvedMaxWords=11000;
+        Artifact oldChapter=chapter(1,"旧线索摘要"); novel.artifacts.add(oldChapter);
+        Artifact plan=plan(); novel.artifacts.add(plan);
+        ElasticsearchShadowSearchService searches=mock(ElasticsearchShadowSearchService.class);
+        var hit=new com.novelforge.projection.ElasticsearchProjectionClient.Hit(oldChapter.approvedVersionId,oldChapter.id,1,
+                9,"第一章","旧线索摘要","旧线索原文");
+        when(searches.search(eq(novel.id),anyString(),eq(2),eq(5))).thenReturn(new ElasticsearchShadowSearchService.Run(
+                "run-1",novel.id,"query",2,5,"SUCCEEDED",1,4,"2026-10-02T00:00:00Z",null,List.of(hit)));
+        ContextAssembler assembler=new ContextAssembler(new CanonService(),rules,words,mapper,1_000_000);
+        assembler.setRetrievalContexts(new RetrievalContextService(searches,true,5,6000));
+
+        var chapterJson=mapper.readTree(assembler.assemble(novel,Action.CHAPTER,null).json());
+        var styleJson=mapper.readTree(assembler.assemble(novel,Action.STYLE_REVIEW,oldChapter.id).json());
+
+        assertThat(chapterJson.path("retrievedConfirmedHistory").path("status").asText()).isEqualTo("APPLIED");
+        assertThat(chapterJson.path("retrievedConfirmedHistory").path("hits").get(0).path("excerpt").asText())
+                .isEqualTo("旧线索原文");
+        assertThat(styleJson.has("retrievedConfirmedHistory")).isFalse();
     }
 
     private Artifact chapter(int number,String summary) {

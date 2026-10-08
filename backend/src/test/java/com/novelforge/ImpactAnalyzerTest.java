@@ -18,6 +18,10 @@ class ImpactAnalyzerTest {
         Novel n=new Novel();Artifact outline=artifact(Kind.OUTLINE);Artifact characters=artifact(Kind.CHARACTERS,outline.latest().id);
         Artifact independent=artifact(Kind.PLAN,"unrelated-version");Artifact chapter=artifact(Kind.CHAPTER,characters.latest().id);
         n.artifacts.addAll(List.of(outline,characters,independent,chapter));
+        var preview=impact.previewFollowing(n,outline);
+        assertThat(preview).containsExactly(characters.id,chapter.id);
+        assertThat(n.artifacts).containsExactly(outline,characters,independent,chapter);
+        assertThat(n.artifacts).noneMatch(item->item.needsRevision);
         var change=impact.invalidateFollowing(n,outline,"只改主角动机");
         assertThat(change.affectedArtifactIds).containsExactly(characters.id,chapter.id);
         assertThat(independent.needsRevision).isFalse();

@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS novels (
+    id CHAR(36) PRIMARY KEY,
+    document LONGTEXT NOT NULL,
+    created_at VARCHAR(40) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

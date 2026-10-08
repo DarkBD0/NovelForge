@@ -104,18 +104,15 @@ class ReviewAggregatorTest {
     }
 
     @Test
-    void rejectsCompoundArchiveEntryAndKeepsTheFixInsideTheArchive() {
+    void doesNotTreatInternalArchiveFormattingAsAProseFailure() {
         Review raw=new Review(true,List.of(),false,false,false,List.of());
         var generated=new ModelGateway.Generated("第一章","王阿姨藏起现金后离开。","摘要",
                 List.of(new Novel.Fact("cash","EVENT","王阿姨藏起现金，并把钥匙交给张洋","ACTIVE")),null);
 
         Review result=aggregator.aggregate(novel(),chapter(),Action.CHAPTER,"",generated,null,raw);
 
-        assertThat(result.passed()).isFalse();
-        assertThat(result.issueDetails()).singleElement().satisfies(issue->{
-            assertThat(issue.problem()).contains("多个动作或状态");
-            assertThat(issue.suggestion()).contains("只拆分当前档案条目").doesNotContain("补写正文");
-        });
+        assertThat(result.passed()).isTrue();
+        assertThat(result.issueDetails()).isEmpty();
     }
 
     private Novel novel() {

@@ -2,6 +2,7 @@ package com.novelforge;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.novelforge.generation.ModelGateway;
 import com.novelforge.generation.ModelGateway.Generated;
 import com.novelforge.infrastructure.NovelRepository;
 import com.novelforge.novel.Novel;
@@ -300,6 +301,9 @@ class HttpRewriteIntegrationTest {
             reply(JSON.writeValueAsString(generated(action)));
             reply(JSON.writeValueAsString(new Review(true,List.of(),false,false,false)));
             if (action==Action.OUTLINE) reply(JSON.writeValueAsString(new Review(true,List.of(),true,true,true)));
+            if (action==Action.CHAPTER) reply(JSON.writeValueAsString(new ModelGateway.StateExtraction(List.of(
+                    new ModelGateway.ExtractedState("event_final","EVENT","本章进入结局","ACTIVE",
+                            List.of("终终终终终终终终终终"))))));
             Task result=submit(n,action,null,"");
             assertThat(result.status).as(result.error).isEqualTo(TaskStatus.SUCCEEDED);
             n=repository.get(n.id); Artifact a=n.artifacts.getLast();
@@ -320,6 +324,6 @@ class HttpRewriteIntegrationTest {
         Novel checked=repository.get(n.id);
         assertThat(checked.status).isEqualTo("WRITING");
         assertThat(workflow.finish(n.id,checked.completionChecks.getLast().id(),checked.revision,true).status).isEqualTo("COMPLETED");
-        assertThat(requests).hasSize(11);
+        assertThat(requests).hasSize(12);
     }
 }

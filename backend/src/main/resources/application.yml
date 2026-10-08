@@ -8,20 +8,61 @@ spring:
   application:
     name: novelforge
   datasource:
-    url: jdbc:h2:file:./data/novelforge;DB_CLOSE_ON_EXIT=FALSE
-    username: sa
-    password: ''
+    url: ${NOVELFORGE_DB_URL:jdbc:h2:file:./data/novelforge;DB_CLOSE_ON_EXIT=FALSE}
+    username: ${NOVELFORGE_DB_USERNAME:sa}
+    password: ${NOVELFORGE_DB_PASSWORD:}
+    driver-class-name: ${NOVELFORGE_DB_DRIVER:org.h2.Driver}
   sql:
     init:
-      mode: always
-      schema-locations: classpath:db/migration/V1__initial.sql
+      mode: never
+  flyway:
+    enabled: true
+    locations: classpath:db/migration/{vendor}
+    baseline-on-migrate: true
+    baseline-version: 0
+    validate-migration-naming: true
   h2:
     console:
       enabled: false
 novelforge:
+  storage:
+    mode: ${NOVELFORGE_STORAGE_MODE:legacy}
+    normalized-shadow-enabled: ${NOVELFORGE_NORMALIZED_SHADOW_ENABLED:true}
+    import-on-startup: ${NOVELFORGE_IMPORT_ON_STARTUP:false}
+    legacy-import-url: ${NOVELFORGE_LEGACY_IMPORT_URL:}
+    legacy-import-username: ${NOVELFORGE_LEGACY_IMPORT_USERNAME:sa}
+    legacy-import-password: ${NOVELFORGE_LEGACY_IMPORT_PASSWORD:}
+  projections:
+    poll-interval-ms: ${NOVELFORGE_PROJECTION_POLL_INTERVAL_MS:5000}
+    elasticsearch:
+      enabled: ${NOVELFORGE_ES_ENABLED:false}
+      url: ${NOVELFORGE_ES_URL:http://127.0.0.1:9200}
+      index: ${NOVELFORGE_ES_INDEX:novelforge-local-memory}
+    neo4j:
+      enabled: ${NOVELFORGE_NEO4J_ENABLED:false}
+      http-url: ${NOVELFORGE_NEO4J_HTTP_URL:http://127.0.0.1:7474}
+      username: ${NOVELFORGE_NEO4J_USERNAME:}
+      password: ${NOVELFORGE_NEO4J_PASSWORD:}
+      project-key: ${NOVELFORGE_NEO4J_PROJECT_KEY:novelforge-local}
   experiments:
     continuity-shadow-enabled: ${NOVELFORGE_CONTINUITY_SHADOW_ENABLED:false}
     plot-foreshadow-shadow-enabled: ${NOVELFORGE_PLOT_FORESHADOW_SHADOW_ENABLED:false}
+    structured-memory-context-shadow-enabled: ${NOVELFORGE_STRUCTURED_MEMORY_CONTEXT_SHADOW_ENABLED:true}
+    structured-memory-continuity-ab-enabled: ${NOVELFORGE_STRUCTURED_MEMORY_CONTINUITY_AB_ENABLED:false}
+    historical-structured-memory-shadow-enabled: ${NOVELFORGE_HISTORICAL_STRUCTURED_MEMORY_SHADOW_ENABLED:false}
+    historical-structured-memory-shadow-max-chapters: ${NOVELFORGE_HISTORICAL_STRUCTURED_MEMORY_SHADOW_MAX_CHAPTERS:5}
+    historical-structured-memory-continuity-ab-enabled: ${NOVELFORGE_HISTORICAL_STRUCTURED_MEMORY_CONTINUITY_AB_ENABLED:false}
+    historical-continuity-gray-enabled: ${NOVELFORGE_HISTORICAL_CONTINUITY_GRAY_ENABLED:false}
+    historical-continuity-gray-novel-ids: ${NOVELFORGE_HISTORICAL_CONTINUITY_GRAY_NOVEL_IDS:}
+    historical-continuity-gray-max-chapters: ${NOVELFORGE_HISTORICAL_CONTINUITY_GRAY_MAX_CHAPTERS:4}
+  structured-memory:
+    max-context-chars: ${NOVELFORGE_STRUCTURED_MEMORY_MAX_CONTEXT_CHARS:6000}
+    max-entities: ${NOVELFORGE_STRUCTURED_MEMORY_MAX_ENTITIES:40}
+    max-relations: ${NOVELFORGE_STRUCTURED_MEMORY_MAX_RELATIONS:80}
+  retrieval:
+    context-enabled: ${NOVELFORGE_RETRIEVAL_CONTEXT_ENABLED:false}
+    result-limit: ${NOVELFORGE_RETRIEVAL_RESULT_LIMIT:5}
+    max-context-chars: ${NOVELFORGE_RETRIEVAL_MAX_CONTEXT_CHARS:6000}
   model:
     mode: ${NOVELFORGE_MODEL_MODE:demo}
     base-url: ${NOVELFORGE_MODEL_BASE_URL:}

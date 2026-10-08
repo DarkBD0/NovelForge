@@ -60,6 +60,25 @@ class ProfessionalReviewReplayServiceTest {
         verify(model,times(1)).plotForeshadowReview(any(),any());
     }
 
+    @Test void limitsRealModelCallsAndRecordsRoleContextComparison() {
+        Novel novel=seed();
+        ProfessionalReviewReplayBatch started=replays.start(novel.id,"one-context-sample",
+                ContinuityShadowService.CHECKER,1);
+        await().atMost(Duration.ofSeconds(10)).until(()->
+                replays.find(novel.id,started.id).status==ShadowReviewStatus.SUCCEEDED);
+
+        ProfessionalReviewReplayBatch completed=replays.find(novel.id,started.id);
+        assertThat(completed.sampleLimit).isEqualTo(1);
+        assertThat(completed.items).singleElement().satisfies(item->{
+            assertThat(item.baselineContextChars).isPositive();
+            assertThat(item.roleContextChars).isPositive();
+            assertThat(item.roleContextHash).hasSize(64);
+            assertThat(item.contextPolicyVersion).isEqualTo(AgentContextPolicy.VERSION);
+        });
+        verify(model,times(1)).continuityReview(any(),any());
+        verify(model,never()).plotForeshadowReview(any(),any());
+    }
+
     private Novel seed() {
         Novel created=workflow.create("对照重放","验证历史候选不会被修改",1000,"");
         return repository.update(created.id,novel->{

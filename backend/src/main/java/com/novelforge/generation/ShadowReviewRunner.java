@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Supplier;
+import java.util.function.Function;
 
 import static com.novelforge.shared.Problem.require;
 
@@ -32,47 +33,71 @@ public class ShadowReviewRunner {
     private final ReviewAggregator reviews;
     private final ProfessionalReviewPolicy professionalPolicy;
     private final ContinuityReviewPolicy continuityPolicy;
+    private final SourceSnapshotFactory snapshots;
     private final ExecutorService executor=Executors.newSingleThreadExecutor(r->{
         Thread thread=new Thread(r,"professional-shadow"); thread.setDaemon(true); return thread;
     });
 
     public ShadowReviewRunner(NovelRepository repository,ReviewAggregator reviews,
                               ProfessionalReviewPolicy professionalPolicy,
-                              ContinuityReviewPolicy continuityPolicy) {
+                              ContinuityReviewPolicy continuityPolicy,SourceSnapshotFactory snapshots) {
         this.repository=repository; this.reviews=reviews; this.professionalPolicy=professionalPolicy;
-        this.continuityPolicy=continuityPolicy;
+        this.continuityPolicy=continuityPolicy; this.snapshots=snapshots;
     }
 
     public void run(Spec spec,String novelId,String taskId,String sourceSnapshotId,String artifactId,String versionId,
                     List<String> upstreamAgentRunIds,ModelGateway.Request request,
                     ModelGateway.Generated candidate,Supplier<Review> modelCall) {
+        queue(spec,novelId,taskId,sourceSnapshotId,artifactId,versionId,upstreamAgentRunIds,
+                request,()->request,candidate,ignored->modelCall.get());
+    }
+
+    /** Queues the report first, then builds expensive context inside the shadow worker. */
+    public void runDeferred(Spec spec,String novelId,String taskId,String sourceSnapshotId,String artifactId,String versionId,
+                    List<String> upstreamAgentRunIds,Supplier<ModelGateway.Request> requestBuilder,
+                    ModelGateway.Generated candidate,Function<ModelGateway.Request,Review> modelCall) {
+        queue(spec,novelId,taskId,sourceSnapshotId,artifactId,versionId,upstreamAgentRunIds,
+                null,requestBuilder,candidate,modelCall);
+    }
+
+    private void queue(Spec spec,String novelId,String taskId,String sourceSnapshotId,String artifactId,String versionId,
+                    List<String> upstreamAgentRunIds,ModelGateway.Request initialRequest,
+                    Supplier<ModelGateway.Request> requestBuilder,ModelGateway.Generated candidate,
+                    Function<ModelGateway.Request,Review> modelCall) {
         if (artifactId==null || versionId==null || modelCall==null) return;
         Pending pending;
         try {
             pending=repository.update(novelId,n->prepare(spec,n,taskId,sourceSnapshotId,artifactId,versionId,
-                    upstreamAgentRunIds==null?List.of():upstreamAgentRunIds));
+                    upstreamAgentRunIds==null?List.of():upstreamAgentRunIds,initialRequest));
         } catch (Exception e) {
             log.warn("Shadow review could not be queued: checker={} task={} exception={}",
                     spec.checker(),taskId,e.getClass().getSimpleName());
             return;
         }
         if (pending==null) return;
-        try { executor.execute(()->execute(spec,novelId,taskId,artifactId,versionId,pending,request,candidate,modelCall)); }
+        try { executor.execute(()->execute(spec,novelId,taskId,artifactId,versionId,pending,
+                requestBuilder,candidate,modelCall)); }
         catch (Exception e) { fail(spec,novelId,taskId,pending,e); }
     }
 
     private void execute(Spec spec,String novelId,String taskId,String artifactId,String versionId,Pending pending,
-                         ModelGateway.Request request,ModelGateway.Generated candidate,Supplier<Review> modelCall) {
+                         Supplier<ModelGateway.Request> requestBuilder,ModelGateway.Generated candidate,
+                         Function<ModelGateway.Request,Review> modelCall) {
         try {
+            ModelGateway.Request request=requestBuilder==null?null:requestBuilder.get();
             repository.update(novelId,n->{
                 ShadowReview shadow=findShadow(n,pending.reportId());
                 if (shadow.modelStartedAt==null) shadow.modelStartedAt=Novel.now();
+                AgentRun run=findRun(n,pending.runId());
+                recordContext(run,request);
                 return null;
             });
             Review formalReview=formalReview(novelId,artifactId,versionId);
-            Review report=professionalPolicy.normalize(reviews.aggregateShadow(modelCall.get(),candidate),
+            Review report=professionalPolicy.normalize(reviews.aggregateShadow(modelCall.apply(request),candidate),
                     candidate,request,formalReview);
-            if (ContinuityShadowService.CHECKER.equals(spec.checker())) report=continuityPolicy.normalize(report);
+            if (ContinuityShadowService.CHECKER.equals(spec.checker())
+                    || HistoricalContinuityGrayService.CHECKER.equals(spec.checker()))
+                report=continuityPolicy.normalize(report);
             Review finalReport=report;
             repository.update(novelId,n->{
                 ShadowReview shadow=findShadow(n,pending.reportId()); AgentRun run=findRun(n,pending.runId());
@@ -106,7 +131,7 @@ public class ShadowReviewRunner {
     }
 
     private Pending prepare(Spec spec,Novel novel,String taskId,String sourceSnapshotId,String artifactId,String versionId,
-                            List<String> upstreamAgentRunIds) {
+                            List<String> upstreamAgentRunIds,ModelGateway.Request request) {
         if (novel.shadowReviews==null) novel.shadowReviews=new ArrayList<>();
         if (novel.agentRuns==null) novel.agentRuns=new ArrayList<>();
         boolean exists=novel.shadowReviews.stream().anyMatch(item->spec.checker().equals(item.checker)
@@ -117,6 +142,7 @@ public class ShadowReviewRunner {
                 "专业影子检查的候选版本不存在");
         AgentRun run=new AgentRun(); run.taskId=taskId; run.sourceSnapshotId=sourceSnapshotId;
         run.role=spec.role().name(); run.operation=spec.operation(); run.inputVersionId=versionId;
+        recordContext(run,request);
         run.upstreamAgentRunIds=new ArrayList<>(upstreamAgentRunIds);
         ShadowReview report=new ShadowReview(); report.taskId=taskId; report.agentRunId=run.id;
         report.sourceSnapshotId=sourceSnapshotId; report.artifactId=artifactId; report.versionId=versionId;
@@ -143,6 +169,20 @@ public class ShadowReviewRunner {
         if (run.status!=AgentRunStatus.RUNNING) return;
         run.status=status; run.resultArtifactId=artifactId; run.resultVersionId=versionId;
         run.error=error; run.finishedAt=Novel.now();
+    }
+
+    private void recordContext(AgentRun run,ModelGateway.Request request) {
+        if(request==null || request.context()==null) return;
+        run.contextPolicyVersion=contextPolicyVersion(request);
+        run.contextJson=request.context().json(); run.contextHash=snapshots.hash(run.contextJson);
+        run.contextSourceVersionIds=new ArrayList<>(request.context().sourceVersions());
+        run.contextChapterNumber=request.context().chapterNumber(); run.contextBatchNumber=request.context().batchNumber();
+    }
+
+    private String contextPolicyVersion(ModelGateway.Request request) {
+        String json=request.context().json();
+        return json!=null&&json.contains("\"policyVersion\":\""+AgentContextPolicy.STRUCTURED_MEMORY_SHADOW_VERSION+"\"")
+                ?AgentContextPolicy.STRUCTURED_MEMORY_SHADOW_VERSION:AgentContextPolicy.VERSION;
     }
 
     @PreDestroy public void close() { executor.shutdownNow(); }

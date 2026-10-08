@@ -12,7 +12,7 @@ import java.util.regex.Pattern;
 @Component
 public class ReviewPolicy {
     /** Persisted with every report so upgraded checking rules make older reports visibly stale. */
-    public static final String VERSION="2026-09-27-v6";
+    public static final String VERSION="2026-10-08-v8";
 
     private static final Pattern QUOTED=Pattern.compile("[‘“\"']([^’”\"']{4,})[’”\"']");
     private static final Pattern CURRENT_TEXT_CLAIM=Pattern.compile("候选原文|当前(?:候选)?原文|正文原文|(当前|候选|正文|摘要|档案|标题|文中|同段|一句).{0,24}(写|说|表述|出现|包含|使用|声明)");
@@ -27,7 +27,10 @@ public class ReviewPolicy {
         if (review==null || review.issueDetails()==null) return review;
         if (review.passed() && review.issueDetails().stream().allMatch(this::legacyFinding)) return review;
         List<ReviewIssue> details=new ArrayList<>(review.issueDetails());
-        if (candidate!=null) details.removeIf(issue->ungroundedCurrentTextClaim(issue,candidate)
+        if (candidate!=null) details.removeIf(issue->groundedOmissionReportedAsMissing(issue,candidate)
+                || planTreatedAsExhaustiveChecklist(issue)
+                || negativeBoundaryDemandedAsProse(issue)
+                || ungroundedCurrentTextClaim(issue,candidate)
                 || previous!=null && staleOldTextClaim(issue,candidate,previous));
         details=details.stream().map(this::keepMetadataFixOutOfProse).toList();
         boolean blocking=details.stream().anyMatch(issue->"必须修正".equals(issue.severity()));
@@ -64,6 +67,37 @@ public class ReviewPolicy {
             if (quote.length()>=4 && current.contains(quote)) return false;
         }
         return true;
+    }
+
+    /** Removes the narrow, provable false-positive: the report says a quoted phrase is absent although it is literal current text. */
+    private boolean groundedOmissionReportedAsMissing(ReviewIssue issue,ModelGateway.Generated candidate) {
+        if(!"必须修正".equals(issue.severity())) return false;
+        String report=reportText(issue);
+        if(!OMISSION.matcher(report).find()) return false;
+        String current=normalizeText(visible(candidate.title(),candidate.content(),candidate.summary(),List.of()));
+        Pattern missingQuote=Pattern.compile("(?:没有|缺少|遗漏|未.{0,8}(?:出现|写出|落实|交代|包含|提及|完成|找到)).{0,40}[‘“\\\"']([^’”\\\"']{4,})[’”\\\"']");
+        var matcher=missingQuote.matcher(report);
+        while(matcher.find()) if(current.contains(normalizeText(matcher.group(1)))) return true;
+        return false;
+    }
+
+    /** A chapter plan fixes required beats and boundaries; it is not an exhaustive list of every scene detail. */
+    private boolean planTreatedAsExhaustiveChecklist(ReviewIssue issue) {
+        if(!"必须修正".equals(issue.severity())) return false;
+        String text=reportText(issue);
+        boolean exhaustive=text.matches("(?s).*(?:超出.{0,18}(?:章节)?(?:规划|计划)(?:的)?范围|(?:规划|计划).{0,24}未(?:提及|安排|要求)|未在.{0,12}(?:规划|计划).{0,12}(?:提及|安排)).*");
+        boolean realConflict=text.matches("(?s).*(?:冲突|矛盾|违反|提前揭示|提前推进|改变主线|遗漏必须|缺少必须).*");
+        return exhaustive&&!realConflict;
+    }
+
+    /** Negative reveal boundaries constrain what may happen; prose need not restate that the forbidden event did not happen. */
+    private boolean negativeBoundaryDemandedAsProse(ReviewIssue issue) {
+        if(!"必须修正".equals(issue.severity())) return false;
+        String text=reportText(issue);
+        boolean omission=OMISSION.matcher(text).find();
+        boolean negative=text.matches("(?s).*(?:不赋予|不得|不能|不会|不构成|不要|不揭示|不说明).*");
+        boolean actualViolation=text.matches("(?s).*(?:正文却|实际却|已经|发生了).{0,24}(?:违反|赋予|揭示|说明|构成).*");
+        return omission&&negative&&!actualViolation;
     }
 
     private String reportText(ReviewIssue issue) {

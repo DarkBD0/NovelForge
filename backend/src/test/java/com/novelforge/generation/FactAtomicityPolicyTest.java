@@ -16,6 +16,13 @@ class FactAtomicityPolicyTest {
                 .containsExactly("王阿姨藏起现金","把钥匙交给张洋","张洋离开宿舍");
     }
 
+    @Test void keepsAdverbInsideASingleConditionAndConsequenceClaim() {
+        assertThat(policy.claims("林澈越权开锁会同时暴露他和周岚。"))
+                .containsExactly("林澈越权开锁会同时暴露他和周岚");
+        assertThat(policy.claims("林澈打开控制柜，同时记录电压变化。"))
+                .containsExactly("林澈打开控制柜","记录电压变化");
+    }
+
     @Test void blocksCompoundFactWithoutAskingForExplanatoryProse() {
         var candidate=new ModelGateway.Generated("第一章","王阿姨藏起现金。","摘要",
                 List.of(new Fact("event_cash","EVENT","王阿姨藏起现金，并把钥匙交给张洋","ACTIVE")),null);
