@@ -33,6 +33,39 @@ public class RoleContextCompiler {
         return compile(request,role,true);
     }
 
+    /**
+     * Historical continuity is a dedicated second opinion, not a replacement for the normal reviewer.
+     * Keep only the verified historical memory and the minimum project metadata so recent prose,
+     * outline text and retrieval results cannot drown out the evidence selected for this check.
+     */
+    public ModelGateway.Request compileHistoricalContinuityShadow(ModelGateway.Request request) {
+        ModelGateway.Request compiled=compile(request,AgentRole.CONTINUITY_AUDITOR,true);
+        if(compiled==null||compiled.context()==null||compiled.context().json()==null) return compiled;
+        try {
+            ObjectNode input=(ObjectNode)mapper.readTree(compiled.context().json());
+            ObjectNode original=(ObjectNode)mapper.readTree(request.context().json());
+            ObjectNode output=mapper.createObjectNode();
+            for(String field:List.of("title","synopsis","requirements","stateModel","formalStructuredMemory"))
+                if(input.has(field)) output.set(field,input.get(field).deepCopy());
+            if(original.has("historicalClaimEvidencePairs")) output.set("historicalClaimEvidencePairs",
+                    original.get("historicalClaimEvidencePairs").deepCopy());
+            ObjectNode contract=input.has("agentContext")&&input.get("agentContext").isObject()
+                    ?((ObjectNode)input.get("agentContext")).deepCopy():mapper.createObjectNode();
+            contract.put("policyVersion",AgentContextPolicy.HISTORICAL_CONTINUITY_SHADOW_VERSION);
+            contract.put("role",AgentRole.CONTINUITY_AUDITOR.name());
+            output.set("agentContext",contract);
+            Set<String> visibleIds=new LinkedHashSet<>();
+            collectVersionIds(output,null,visibleIds);
+            List<String> sources=compiled.context().sourceVersions().stream().filter(visibleIds::contains).toList();
+            ContextAssembler.Context focused=new ContextAssembler.Context(mapper.writeValueAsString(output),sources,
+                    compiled.context().chapterNumber(),compiled.context().batchNumber());
+            return new ModelGateway.Request(compiled.action(),compiled.novel(),compiled.target(),focused,
+                    compiled.instructions());
+        } catch(Exception failure) {
+            throw new Problem(500,"无法为历史连续性 Agent 编译精简上下文；尚未调用模型");
+        }
+    }
+
     private ModelGateway.Request compile(ModelGateway.Request request,AgentRole role,boolean structuredMemoryShadow) {
         if(request==null || request.context()==null || request.context().json()==null) return request;
         try {

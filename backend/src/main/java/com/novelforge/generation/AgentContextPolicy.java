@@ -10,6 +10,7 @@ import java.util.Set;
 public class AgentContextPolicy {
     public static final String VERSION="agent-context-v1";
     public static final String STRUCTURED_MEMORY_SHADOW_VERSION="agent-context-structured-memory-shadow-v1";
+    public static final String HISTORICAL_CONTINUITY_SHADOW_VERSION="agent-context-historical-continuity-shadow-v2";
     public enum Section {
         PROJECT_BRIEF,
         CONVERSATION_BRIEF,

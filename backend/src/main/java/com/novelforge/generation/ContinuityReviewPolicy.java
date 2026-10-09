@@ -11,7 +11,7 @@ import java.util.regex.Pattern;
 /** High-precision gate applied only to the experimental continuity checker. */
 @Component
 public class ContinuityReviewPolicy {
-    public static final String VERSION="2026-10-05-continuity-v3.3";
+    public static final String VERSION="2026-10-08-continuity-v3.4";
     private static final Pattern ALLOWED_ID=Pattern.compile(
             "^CONTINUITY:(IDENTITY|RELATION|LIFE_STATE|OBJECT_LOCATION|OBJECT_OWNERSHIP|ABSOLUTE_TIME|WORLD_RULE|ABILITY_BOUNDARY):HIGH$");
     private static final List<String> PROOF_FIELDS=List.of(
@@ -28,6 +28,8 @@ public class ContinuityReviewPolicy {
                     +"雨.{0,12}停|停.{0,12}雨");
     private static final Pattern EXCLUSIVE_OBJECT_CLAIM=Pattern.compile(
             "唯一(?:的)?(?:开启|打开|对应|用途|位置|归属|持有)|只能(?:用于|打开|开启|对应|位于|属于|持有)");
+    private static final Pattern HIGH_RISK_EXCLUSIVE_CLAIM=Pattern.compile(
+            "从来没有|从未|此前从未|第一次|首次|并非|没有任何|唯一|一直|只能");
 
     private static final List<InferredId> INFERRED_IDS=List.of(
             new InferredId("CONTINUITY:IDENTITY:HIGH",Pattern.compile("身份|姓名|性别|年龄")),
@@ -35,10 +37,12 @@ public class ContinuityReviewPolicy {
                     "关系|亲属|父子|父女|母子|母女|夫妻|恋人|同事|共事|委托|受托")),
             new InferredId("CONTINUITY:LIFE_STATE:HIGH",Pattern.compile("生死|存活|死亡状态|生命状态")),
             new InferredId("CONTINUITY:OBJECT_LOCATION:HIGH",Pattern.compile(
-                    "(?:发现|存放|所在)?位置|地点|方位|(?:首次)?(?:获得|取得|发现)来源|首次获得|首次取得")),
+                    "(?:发现|存放|所在)?位置|地点|方位|(?:首次)?(?:获得|取得|发现)来源|首次获得|首次取得|"
+                            +"来源(?:[/／、与和](?:发现|获得|取得)方式)?|(?:发现|获得|取得)方式")),
             new InferredId("CONTINUITY:OBJECT_OWNERSHIP:HIGH",Pattern.compile("归属|所有权|持有人|拥有者")),
             new InferredId("CONTINUITY:ABSOLUTE_TIME:HIGH",Pattern.compile(
-                    "绝对时间|日期|年月日|钟点|具体起止时间|起止时间|值班时段|值班时间")),
+                    "绝对时间|日期|年月日|钟点|具体起止时间|起止时间|值班时段|值班时间|值班班次|班次|排班|"
+                            +"白天.{0,4}夜间|夜间.{0,4}白天|白班.{0,4}夜班|夜班.{0,4}白班")),
             new InferredId("CONTINUITY:WORLD_RULE:HIGH",Pattern.compile("世界规则|规则约束|基础规则")),
             new InferredId("CONTINUITY:ABILITY_BOUNDARY:HIGH",Pattern.compile("能力边界|能力限制|能力规则"))
     );
@@ -65,6 +69,10 @@ public class ContinuityReviewPolicy {
         boolean passed=kept.stream().noneMatch(issue->"必须修正".equals(issue.severity()));
         return new Review(passed,kept.stream().map(ReviewIssue::text).toList(),review.mainlineResolved(),
                 review.endingClear(),review.foreshadowingResolved(),kept);
+    }
+
+    public boolean requiresRecallRetry(String candidateText) {
+        return candidateText!=null&&HIGH_RISK_EXCLUSIVE_CLAIM.matcher(candidateText).find();
     }
 
     private String normalizedIssueId(ReviewIssue issue) {

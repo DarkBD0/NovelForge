@@ -1,6 +1,7 @@
 package com.novelforge.generation;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.novelforge.novel.Novel;
 import com.novelforge.shared.Problem;
 import org.junit.jupiter.api.Test;
 
@@ -73,5 +74,17 @@ class ModelJsonReaderRecoveryTest {
         assertThat(generated.content()).contains("第1章至第1章章节规划","周岚委托林澈调查旧站台",
                 "场景节点：","批次衔接：本章完成故事");
         assertThat(generated.plan()).isNotNull();
+    }
+
+    @Test void suppliesNeutralSuggestionForOtherwiseCompleteReviewFinding() {
+        String json="""
+                {"passed":false,"issues":[{"location":"当前正文","problem":"时间冲突",
+                 "evidence":"候选与已确认时间互斥","suggestion":"","severity":"必须修正"}]}
+                """;
+
+        Novel.Review review=reader.read(json,Novel.Review.class);
+
+        assertThat(review.issueDetails()).singleElement().satisfies(issue->
+                assertThat(issue.suggestion()).isEqualTo("请由作者核对后修改"));
     }
 }

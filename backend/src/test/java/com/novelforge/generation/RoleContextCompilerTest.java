@@ -45,6 +45,26 @@ class RoleContextCompilerTest {
         assertThat(shadow.context().sourceVersions()).contains("entity-source");
     }
 
+    @Test void historicalContinuityShadowKeepsVerifiedMemoryButDropsCompetingNarrativeContext() throws Exception {
+        ModelGateway.Request focused=compiler.compileHistoricalContinuityShadow(request());
+        var json=mapper.readTree(focused.context().json());
+
+        assertThat(json.path("formalStructuredMemory").path("entities").get(0).path("name").asText())
+                .isEqualTo("林澈");
+        assertThat(json.path("agentContext").path("policyVersion").asText())
+                .isEqualTo(AgentContextPolicy.HISTORICAL_CONTINUITY_SHADOW_VERSION);
+        assertThat(json.path("agentContext").path("role").asText()).isEqualTo("CONTINUITY_AUDITOR");
+        assertThat(json.path("historicalClaimEvidencePairs").path("pairs").get(0)
+                .path("historicalQuote").asText()).isEqualTo("林澈曾与周岚共事");
+        assertThat(json.has("acceptedReferences")).isFalse();
+        assertThat(json.has("canonBeforeChapter")).isFalse();
+        assertThat(json.has("currentChapterPlan")).isFalse();
+        assertThat(json.has("previousChapterSummary")).isFalse();
+        assertThat(json.has("retrievedConfirmedHistory")).isFalse();
+        assertThat(json.has("revisionTarget")).isFalse();
+        assertThat(focused.context().sourceVersions()).containsExactly("entity-source");
+    }
+
     @Test void styleAuditorSeesCandidateAndCanonButNoBroadHistoryOrRetrieval() throws Exception {
         ModelGateway.Request compiled=compiler.compile(request(),AgentRole.STYLE_AUDITOR);
         var json=mapper.readTree(compiled.context().json());
@@ -80,6 +100,9 @@ class RoleContextCompilerTest {
                     "entities":[{"key":"character_lin_che","type":"CHARACTER","name":"林澈","sourceVersionId":"entity-source"}],
                     "relations":[{"key":"relation_colleague","fromEntityKey":"character_lin_che","type":"COLLEAGUE","toEntityKey":"character_zhou_lan","sourceVersionId":"entity-source"}]
                   },
+                  "historicalClaimEvidencePairs":{"policyVersion":"historical-claim-evidence-pairing-v1","pairs":[
+                    {"candidateClaim":"林澈否认共事","historicalQuote":"林澈曾与周岚共事","sourceVersionId":"entity-source"}
+                  ]},
                   "currentChapterPlan":{"title":"第五章","purpose":"回查旧线索"},
                   "chapterBrief":{"coreChange":"找到证据"},
                   "previousChapterSummary":"第四章摘要",

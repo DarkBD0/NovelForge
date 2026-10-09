@@ -35,6 +35,8 @@ public class StructuredMemoryContextService {
     }
     private record RankedEntity(EntityRef value,int score) {}
     private record RankedRelation(RelationRef value,int score) {}
+    private record HistoricalRank(String kind,String key,int score,int chapter,Object value) {}
+    private record EvidenceRank(int score,HistoricalStructuredMemoryShadowService.ShadowEvidence evidence) {}
 
     private final CanonService canon;
     private final ObjectMapper mapper;
@@ -125,6 +127,136 @@ public class StructuredMemoryContextService {
                     SELECTION_POLICY_VERSION,note);
         }
         return result;
+    }
+
+    /**
+     * Historical shadow extraction can produce far more verified material than one checker should read.
+     * Select only candidate-relevant items while preserving exact evidence quotes and relation endpoints.
+     */
+    public HistoricalStructuredMemoryShadowService.Aggregate selectHistorical(
+            HistoricalStructuredMemoryShadowService.Aggregate source,String query) {
+        return selectHistorical(source,query,maxChars);
+    }
+
+    public HistoricalStructuredMemoryShadowService.Aggregate selectHistorical(
+            HistoricalStructuredMemoryShadowService.Aggregate source,String query,int requestedMaxChars) {
+        int historicalMaxChars=Math.max(800,Math.min(maxChars,requestedMaxChars));
+        if(source==null) return new HistoricalStructuredMemoryShadowService.Aggregate(
+                "MODEL_DERIVED_HISTORICAL_SHADOW",List.of(),List.of(),List.of(),"没有历史影子记忆");
+        String normalizedQuery=normalize(query);
+        Map<String,HistoricalStructuredMemoryShadowService.ShadowEntity> entityByKey=new LinkedHashMap<>();
+        source.entities().forEach(item->entityByKey.put(item.key(),item));
+        List<HistoricalRank> ranked=new ArrayList<>();
+        source.facts().forEach(item->ranked.add(new HistoricalRank("FACT",item.key(),
+                historicalScore(normalizedQuery,item.key(),item.type(),item.detail(),
+                        item.evidence().stream().map(HistoricalStructuredMemoryShadowService.ShadowEvidence::quote).toList()),
+                item.lastChapter(),item)));
+        source.entities().forEach(item->{
+            List<String> values=new ArrayList<>(); values.add(item.name()); values.add(item.description());
+            values.addAll(item.aliases());
+            values.addAll(item.evidence().stream().map(HistoricalStructuredMemoryShadowService.ShadowEvidence::quote).toList());
+            ranked.add(new HistoricalRank("ENTITY",item.key(),historicalScore(normalizedQuery,item.key(),item.type(),
+                    item.name(),values),item.lastChapter(),item));
+        });
+        source.relations().forEach(item->{
+            List<String> values=new ArrayList<>(); values.add(item.fromEntityKey()); values.add(item.toEntityKey());
+            values.addAll(item.evidence().stream().map(HistoricalStructuredMemoryShadowService.ShadowEvidence::quote).toList());
+            var from=entityByKey.get(item.fromEntityKey()); var to=entityByKey.get(item.toEntityKey());
+            if(from!=null) { values.add(from.name()); values.addAll(from.aliases()); }
+            if(to!=null) { values.add(to.name()); values.addAll(to.aliases()); }
+            ranked.add(new HistoricalRank("RELATION",item.key(),historicalScore(normalizedQuery,item.key(),item.type(),
+                    item.detail(),values),item.validFromChapter(),item));
+        });
+        ranked.sort(Comparator.comparingInt(HistoricalRank::score).reversed()
+                .thenComparing(Comparator.comparingInt(HistoricalRank::chapter).reversed())
+                .thenComparing(HistoricalRank::kind).thenComparing(HistoricalRank::key));
+
+        List<HistoricalStructuredMemoryShadowService.ShadowFact> facts=new ArrayList<>();
+        LinkedHashMap<String,HistoricalStructuredMemoryShadowService.ShadowEntity> entities=new LinkedHashMap<>();
+        List<HistoricalStructuredMemoryShadowService.ShadowRelation> relations=new ArrayList<>();
+        for(HistoricalRank item:ranked) {
+            var candidateFacts=new ArrayList<>(facts);
+            var candidateEntities=new LinkedHashMap<>(entities);
+            var candidateRelations=new ArrayList<>(relations);
+            switch(item.kind()) {
+                case "FACT" -> { if(candidateFacts.size()>=80) continue;
+                    candidateFacts.add((HistoricalStructuredMemoryShadowService.ShadowFact)item.value()); }
+                case "ENTITY" -> { if(candidateEntities.size()>=maxEntities) continue;
+                    var value=(HistoricalStructuredMemoryShadowService.ShadowEntity)item.value();
+                    candidateEntities.putIfAbsent(value.key(),value); }
+                case "RELATION" -> {
+                    if(candidateRelations.size()>=maxRelations) continue;
+                    var value=(HistoricalStructuredMemoryShadowService.ShadowRelation)item.value();
+                    if(entityByKey.containsKey(value.fromEntityKey()))
+                        candidateEntities.putIfAbsent(value.fromEntityKey(),entityByKey.get(value.fromEntityKey()));
+                    if(entityByKey.containsKey(value.toEntityKey()))
+                        candidateEntities.putIfAbsent(value.toEntityKey(),entityByKey.get(value.toEntityKey()));
+                    if(candidateEntities.size()>maxEntities) continue;
+                    candidateRelations.add(value);
+                }
+                default -> throw new IllegalStateException("未知历史记忆类型");
+            }
+            var candidate=historicalAggregate(source,candidateFacts,List.copyOf(candidateEntities.values()),candidateRelations);
+            if(serializedChars(candidate)<=historicalMaxChars) {
+                facts=candidateFacts; entities=candidateEntities; relations=candidateRelations;
+            }
+        }
+        return historicalAggregate(source,List.copyOf(facts),List.copyOf(entities.values()),List.copyOf(relations),
+                historicalMaxChars);
+    }
+
+    /** A tiny recall-retry view containing only locally verified chapter quotes. */
+    public HistoricalStructuredMemoryShadowService.Aggregate focusHistoricalEvidence(
+            HistoricalStructuredMemoryShadowService.Aggregate source,String query,int maxQuotes) {
+        if(source==null||maxQuotes<1) return new HistoricalStructuredMemoryShadowService.Aggregate(
+                "MODEL_DERIVED_HISTORICAL_SHADOW",List.of(),List.of(),List.of(),"没有可用的历史引文");
+        String normalizedQuery=normalize(query);
+        LinkedHashMap<String,HistoricalStructuredMemoryShadowService.ShadowEvidence> unique=new LinkedHashMap<>();
+        source.facts().forEach(item->item.evidence().forEach(value->unique.putIfAbsent(
+                value.sourceVersionId()+"\n"+value.quote(),value)));
+        source.entities().forEach(item->item.evidence().forEach(value->unique.putIfAbsent(
+                value.sourceVersionId()+"\n"+value.quote(),value)));
+        source.relations().forEach(item->item.evidence().forEach(value->unique.putIfAbsent(
+                value.sourceVersionId()+"\n"+value.quote(),value)));
+        List<EvidenceRank> ranked=unique.values().stream().map(value->new EvidenceRank(
+                        textScore(normalizedQuery,value.quote(),2000),value))
+                .sorted(Comparator.comparingInt(EvidenceRank::score).reversed()
+                        .thenComparing(item->item.evidence().chapterNumber(),Comparator.reverseOrder())
+                        .thenComparing(item->item.evidence().quote()))
+                .limit(maxQuotes).toList();
+        List<HistoricalStructuredMemoryShadowService.ShadowFact> facts=new ArrayList<>();
+        int index=0;
+        for(EvidenceRank item:ranked) {
+            var value=item.evidence();
+            facts.add(new HistoricalStructuredMemoryShadowService.ShadowFact("evidence_focus_"+(++index),"EVENT",
+                    "候选相关的已确认原文引文，仅用于逐字冲突对照","ACTIVE",value.chapterNumber(),
+                    value.chapterNumber(),List.of(value.sourceVersionId()),List.of(value)));
+        }
+        return new HistoricalStructuredMemoryShadowService.Aggregate(source.authorityState(),List.copyOf(facts),
+                List.of(),List.of(),"聚焦复核视图；包装字段不是事实，evidence.quote 是本地逐字验证过的已确认正文");
+    }
+
+    private HistoricalStructuredMemoryShadowService.Aggregate historicalAggregate(
+            HistoricalStructuredMemoryShadowService.Aggregate source,
+            List<HistoricalStructuredMemoryShadowService.ShadowFact> facts,
+            List<HistoricalStructuredMemoryShadowService.ShadowEntity> entities,
+            List<HistoricalStructuredMemoryShadowService.ShadowRelation> relations) {
+        return historicalAggregate(source,facts,entities,relations,maxChars);
+    }
+
+    private HistoricalStructuredMemoryShadowService.Aggregate historicalAggregate(
+            HistoricalStructuredMemoryShadowService.Aggregate source,
+            List<HistoricalStructuredMemoryShadowService.ShadowFact> facts,
+            List<HistoricalStructuredMemoryShadowService.ShadowEntity> entities,
+            List<HistoricalStructuredMemoryShadowService.ShadowRelation> relations,int characterBudget) {
+        return new HistoricalStructuredMemoryShadowService.Aggregate(source.authorityState(),facts,entities,relations,
+                source.note()+"；已按当前候选相关性筛选，序列化字符额度不超过 "+characterBudget);
+    }
+
+    private int historicalScore(String query,String key,String type,String main,List<String> values) {
+        int score=textScore(query,key.replace('_',' '),300)+textScore(query,type,200)+textScore(query,main,600);
+        for(String value:values) score+=textScore(query,value,1000);
+        return score;
     }
 
     private boolean fits(int beforeChapter,List<EntityRef> entities,List<RelationRef> relations) {

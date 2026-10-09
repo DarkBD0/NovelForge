@@ -56,8 +56,13 @@ class HistoricalContinuityGrayIntegrationTest {
                 "冲突对象：旧钟｜冲突属性：世界规则｜原状态时间：第一章｜候选状态时间：第五章｜"
                         +"同一时点：“是”｜推进授权：“无”｜候选原文：“旧钟楼的机械钟突然恢复了转动”｜"
                         +"已确认依据：“旧钟楼的机械钟早已停摆”","说明恢复原因或保持停摆","必须修正");
-        when(model.continuityReview(any(),any())).thenReturn(new Review(false,List.of(issue.text()),
-                false,false,false,List.of(issue)));
+        ReviewIssue paraphrased=new ReviewIssue("CONTINUITY:WORLD_RULE:HIGH","第五章候选正文","旧钟状态冲突",
+                "冲突对象：旧钟｜冲突属性：世界规则｜原状态时间：第一章｜候选状态时间：第五章｜"
+                        +"同一时点：“是”｜推进授权：“无”｜候选原文：“旧钟楼的机械钟突然恢复了转动”｜"
+                        +"已确认依据：“资料显示旧钟早已停摆”","说明恢复原因或保持停摆","必须修正");
+        when(model.continuityReview(any(),any()))
+                .thenReturn(new Review(false,List.of(paraphrased.text()),false,false,false,List.of(paraphrased)))
+                .thenReturn(new Review(false,List.of(issue.text()),false,false,false,List.of(issue)));
 
         Artifact chapter=novel.artifacts.getLast();
         Task task=tasks.submit(novel.id,Action.REVIEW,chapter.id,"",Novel.uid(),novel.revision);
@@ -69,6 +74,7 @@ class HistoricalContinuityGrayIntegrationTest {
         assertThat(version.review.passed()).isTrue();
         assertThat(shadow.status).isEqualTo(ShadowReviewStatus.SUCCEEDED);
         assertThat(shadow.review.issueDetails()).hasSize(1);
+        verify(model,times(2)).continuityReview(any(),any());
         assertThat(saved.agentRuns).anySatisfy(run->{
             if("shadow-historical-continuity-review".equals(run.operation)) {
                 assertThat(run.contextPolicyVersion).isEqualTo(AgentContextPolicy.STRUCTURED_MEMORY_SHADOW_VERSION);

@@ -11,6 +11,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ContinuityReviewPolicyTest {
     private final ContinuityReviewPolicy policy=new ContinuityReviewPolicy();
 
+    @Test void requestsOneRecallRetryOnlyForHighRiskExclusiveClaims() {
+        assertThat(policy.requiresRecallRetry("他声称这是第一次拿到铜钥匙，此前从未见过。"))
+                .isTrue();
+        assertThat(policy.requiresRecallRetry("他收好铜钥匙，继续前往灯塔。"))
+                .isFalse();
+    }
+
     @Test void keepsAHighConfidenceSameTimeObjectLocationConflict() {
         ReviewIssue issue=issue("CONTINUITY:OBJECT_LOCATION:HIGH","钥匙在同一发现事件中出现于两个地点",
                 "把候选中的发现位置改回外卖箱夹层");
@@ -62,6 +69,26 @@ class ContinuityReviewPolicyTest {
                 .extracting(ReviewIssue::issueId).isEqualTo("CONTINUITY:ABSOLUTE_TIME:HIGH");
     }
 
+    @Test void infersAbsoluteTimeWhenModelCallsTheConflictAShiftType() {
+        String evidence="冲突对象：周海五年前雨夜的值班时段｜冲突属性：值班班次（白班/夜班）｜"
+                +"原状态时间：第十章｜候选状态时间：当前章节｜同一时点：“是”｜推进授权：“无”｜"
+                +"候选原文：“上午十点到下午六点”｜已确认依据：“夜间十点到次日清晨六点”";
+        ReviewIssue missingId=new ReviewIssue("当前段落","同一次值班被写成白班",evidence,
+                "统一值班班次","必须修正");
+        assertThat(policy.normalize(review(missingId)).issueDetails()).singleElement()
+                .extracting(ReviewIssue::issueId).isEqualTo("CONTINUITY:ABSOLUTE_TIME:HIGH");
+    }
+
+    @Test void infersAbsoluteTimeWhenModelDescribesDayVersusNight() {
+        String evidence="冲突对象：周海五年前的值班时段｜冲突属性：白天还是夜间｜"
+                +"原状态时间：第五章｜候选状态时间：当前章节｜同一时点：“是”｜推进授权：“无”｜"
+                +"候选原文：“上午十点到下午六点”｜已确认依据：“周海值夜班”";
+        ReviewIssue missingId=new ReviewIssue("当前段落","同一次值班被写成白天",evidence,
+                "统一值班时间","必须修正");
+        assertThat(policy.normalize(review(missingId)).issueDetails()).singleElement()
+                .extracting(ReviewIssue::issueId).isEqualTo("CONTINUITY:ABSOLUTE_TIME:HIGH");
+    }
+
     @Test void infersObjectLocationForFirstAcquisitionSource() {
         String evidence="冲突对象：铜钥匙｜冲突属性：首次获得来源｜原状态时间：第一章｜候选状态时间：当前章节｜"
                 +"同一时点：“是”｜推进授权：“无”｜候选原文：“在旧船舱首次发现”｜"
@@ -69,6 +96,47 @@ class ContinuityReviewPolicyTest {
         ReviewIssue missingId=new ReviewIssue("当前段落","铜钥匙的首次获得来源互斥",evidence,
                 "统一首次获得来源","必须修正");
         assertThat(policy.normalize(review(missingId)).issueDetails()).singleElement()
+                .extracting(ReviewIssue::issueId).isEqualTo("CONTINUITY:OBJECT_LOCATION:HIGH");
+    }
+
+    @Test void infersObjectLocationForCombinedSourceAndFirstDiscoveryAttribute() {
+        String evidence="冲突对象：铜钥匙｜冲突属性：来源与首次发现位置｜原状态时间：已确认第一章｜"
+                +"候选状态时间：当前章节（承接第一章同一时点）｜同一时点：“是”｜推进授权：“无”｜"
+                +"候选原文：“父亲来信里从来没有铜钥匙。他第一次拿到铜钥匙，是后来在旧船舱地板下发现的。”｜"
+                +"已确认依据：“林舟推开修船铺的门，桌上放着一封父亲的来信。信里只有一枚铜钥匙和一行灯语。”";
+        ReviewIssue missingId=new ReviewIssue("当前章节开头","候选中的钥匙来源和首次发现地点与已确认内容互斥",
+                evidence,"统一铜钥匙的来源和首次发现位置","必须修正");
+        assertThat(policy.normalize(review(missingId)).issueDetails()).singleElement()
+                .extracting(ReviewIssue::issueId).isEqualTo("CONTINUITY:OBJECT_LOCATION:HIGH");
+    }
+
+    @Test void infersObjectLocationForSourceSlashDiscoveryMethod() {
+        String evidence="冲突对象：铜钥匙｜冲突属性：来源/发现方式｜原状态时间：第一章｜候选状态时间：当前章节｜"
+                +"同一时点：“是”｜推进授权：“无”｜候选原文：“后来在船舱首次发现”｜"
+                +"已确认依据：“信里只有一枚铜钥匙和一行灯语”";
+        ReviewIssue missingId=new ReviewIssue("当前章节","铜钥匙的来源与已确认内容互斥",evidence,
+                "统一铜钥匙来源","必须修正");
+        assertThat(policy.normalize(review(missingId)).issueDetails()).singleElement()
+                .extracting(ReviewIssue::issueId).isEqualTo("CONTINUITY:OBJECT_LOCATION:HIGH");
+    }
+
+    @Test void keepsTheRealBronzeKeyFindingAfterCurrentCandidateGrounding() {
+        String content="林舟确认，父亲来信里从来没有铜钥匙，信中只有那行灯语。"
+                +"他第一次拿到铜钥匙，是后来在旧船舱地板下发现的；此前从未见过。";
+        String evidence="冲突对象：铜钥匙｜冲突属性：来源与首次发现位置｜原状态时间：已确认第一章｜"
+                +"候选状态时间：当前章节（承接第一章同一时点）｜同一时点：“是”｜推进授权：“无”｜"
+                +"候选原文：“"+content+"”｜已确认依据：“林舟推开修船铺的门，桌上放着一封父亲的来信。"
+                +"信里只有一枚铜钥匙和一行灯语。”";
+        ReviewIssue issue=new ReviewIssue("当前章节开头“林舟确认，父亲来信里从来没有铜钥匙”",
+                "候选中的钥匙来源和首次发现地点与已确认内容互斥",evidence,
+                "删除互斥表述，改为铜钥匙来自父亲来信","必须修正");
+        Review raw=review(issue);
+        var candidate=new ModelGateway.Generated("长篇固定集冲突验收",content,
+                "林舟声称铜钥匙并非来自父亲来信，而是在旧船舱首次发现。",List.of(),null);
+
+        Review candidateGrounded=new ReviewPolicy().normalize(raw,candidate,null);
+        assertThat(candidateGrounded.issueDetails()).containsExactly(issue);
+        assertThat(policy.normalize(candidateGrounded).issueDetails()).singleElement()
                 .extracting(ReviewIssue::issueId).isEqualTo("CONTINUITY:OBJECT_LOCATION:HIGH");
     }
 

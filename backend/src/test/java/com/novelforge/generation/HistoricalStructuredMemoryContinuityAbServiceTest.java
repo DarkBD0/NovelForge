@@ -24,8 +24,11 @@ class HistoricalStructuredMemoryContinuityAbServiceTest {
         ContinuityReviewPolicy continuity=mock(ContinuityReviewPolicy.class);
         ObjectMapper mapper=new ObjectMapper();
         var compiler=new RoleContextCompiler(mapper,new AgentContextPolicy());
+        var memorySelector=new StructuredMemoryContextService(mock(com.novelforge.canon.CanonService.class),
+                mapper,6000,40,80);
         var service=new HistoricalStructuredMemoryContinuityAbService(assembler,historical,compiler,model,reviews,
-                continuity,mapper,new HistoricalEvidenceReviewPolicy(),new SourceSnapshotFactory(),true);
+                continuity,mapper,new HistoricalEvidenceReviewPolicy(),memorySelector,
+                new HistoricalClaimEvidencePairingService(),new SourceSnapshotFactory(),true);
         Novel novel=new Novel(); novel.id="novel-1"; novel.revision=19; novel.title="长篇验收";
         var base=new ContextAssembler.Context("{\"title\":\"长篇验收\",\"acceptedReferences\":[]}",
                 List.of("current-plan"),30,2);
@@ -62,7 +65,9 @@ class HistoricalStructuredMemoryContinuityAbServiceTest {
                 List.of(issue,ungrounded));
         when(model.continuityReview(any(),any())).thenAnswer(invocation->{
             ModelGateway.Request request=invocation.getArgument(0);
-            calls.incrementAndGet();
+            int call=calls.incrementAndGet();
+            if(call==1&&!request.context().json().contains("MODEL_DERIVED_HISTORICAL_SHADOW"))
+                throw new Problem(502,"模型 JSON 不完整");
             return request.context().json().contains("MODEL_DERIVED_HISTORICAL_SHADOW")?finding:empty;
         });
         when(reviews.aggregateShadow(any(),any())).thenAnswer(invocation->invocation.getArgument(0));
@@ -79,10 +84,12 @@ class HistoricalStructuredMemoryContinuityAbServiceTest {
         assertThat(report.historicalMemory().acceptedFindings()).isOne();
         assertThat(report.historicalMemory().rawFindings()).isEqualTo(2);
         assertThat(report.historicalMemory().review().issueDetails()).containsExactly(issue);
+        assertThat(report.historicalMemory().contextPolicyVersion())
+                .isEqualTo(AgentContextPolicy.HISTORICAL_CONTINUITY_SHADOW_VERSION);
         assertThat(report.official().contextHash()).isNotEqualTo(report.historicalMemory().contextHash());
         assertThat(report.historicalMemoryOnlyFindings()).containsExactly("CONTINUITY:WORLD_RULE:HIGH");
         assertThat(cached).isSameAs(report);
-        assertThat(calls).hasValue(2);
+        assertThat(calls).hasValue(3);
         verify(historical,times(1)).evaluate(same(novel),startsWith("continuity-ab-memory-"),eq(List.of(1)));
         assertThat(novel.revision).isEqualTo(19);
         assertThatThrownBy(()->service.evaluate(novel,"historical-ab-1",List.of(1),

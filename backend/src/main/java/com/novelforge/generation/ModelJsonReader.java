@@ -199,13 +199,17 @@ final class ModelJsonReader {
                 node.path("endingClear").asBoolean(),node.path("foreshadowingResolved").asBoolean(),details.isEmpty()&& !texts.isEmpty()?null:details);
     }
     private ReviewIssue readIssue(JsonNode issue,String defaultSeverity) {
-        strings(issue,"location","problem","evidence","suggestion");
+        strings(issue,"location","problem","evidence");
+        JsonNode suggestionNode=issue.get("suggestion");
+        require(suggestionNode==null||suggestionNode.isNull()||suggestionNode.isTextual(),
+                "suggestion 必须是文本");
+        String suggestion=suggestionNode==null||suggestionNode.isNull()?"":suggestionNode.asText();
         String severity=issue.path("severity").isTextual()&&!issue.path("severity").asText().isBlank()
                 ?issue.path("severity").asText():defaultSeverity;
         require(List.of("必须修正","作者决定","建议优化").contains(severity),
                 "问题严重程度只能是“必须修正”“作者决定”或“建议优化”");
         return new ReviewIssue(issue.path("location").asText(),issue.path("problem").asText(),issue.path("evidence").asText(),
-                issue.path("suggestion").asText(),severity);
+                suggestion,severity);
     }
 
     private String singleObject(String text) {

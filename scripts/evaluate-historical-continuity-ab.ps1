@@ -2,6 +2,7 @@ param(
     [string]$BaseUrl = 'http://127.0.0.1:8080',
     [string]$CasesPath = 'runtime/evaluations/historical-continuity-cases.local.json',
     [string]$CaseName = '',
+    [string]$RunTag = '',
     [int]$TimeoutSeconds = 600
 )
 
@@ -17,7 +18,7 @@ if($CaseName){
 }
 
 function Stable-Key([object]$Case,[string]$Variant,[object]$Candidate){
-    $source="$($Case.novelId)|$($Case.chapterNumbers -join ',')|$Variant|$($Candidate.title)|$($Candidate.content)|$($Candidate.summary)"
+    $source="$($Case.novelId)|$($Case.chapterNumbers -join ',')|$RunTag|$Variant|$($Candidate.title)|$($Candidate.content)|$($Candidate.summary)"
     $bytes=[Text.Encoding]::UTF8.GetBytes($source)
     $hash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
     return "historical-fixed-$Variant-$($hash.Substring(0,40))"
@@ -57,7 +58,8 @@ function Historical-Quotes([object]$Report){
 
 function Confirmed-Quote([string]$Evidence){
     if(-not $Evidence){return ''}
-    $match=[regex]::Match($Evidence,'已确认依据\s*[：:]\s*[“"]([^”"]+)[”"]')
+    # Keep the source ASCII-only so Windows PowerShell 5.1 does not misread UTF-8 punctuation.
+    $match=[regex]::Match($Evidence,'\u5df2\u786e\u8ba4\u4f9d\u636e\s*[\uFF1A:]\s*[\u201C"]([^\u201D"]+)[\u201D"]')
     if($match.Success){return $match.Groups[1].Value}
     return ''
 }

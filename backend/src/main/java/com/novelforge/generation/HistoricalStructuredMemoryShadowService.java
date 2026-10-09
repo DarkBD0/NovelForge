@@ -29,7 +29,7 @@ import static com.novelforge.shared.Problem.require;
  */
 @Service
 public class HistoricalStructuredMemoryShadowService {
-    public static final String POLICY_VERSION="historical-structured-memory-shadow-v1";
+    public static final String POLICY_VERSION="historical-structured-memory-shadow-v2";
     public record ShadowEvidence(String quote,String sourceVersionId,int chapterNumber) {}
     public record ShadowFact(String key,String type,String detail,String state,int firstChapter,int lastChapter,
                              List<String> sourceVersionIds,List<ShadowEvidence> evidence) {}
@@ -47,6 +47,7 @@ public class HistoricalStructuredMemoryShadowService {
                          long novelRevision,List<Integer> requestedChapters,int modelCalls,
                          List<ChapterResult> chapters,Aggregate aggregate,String note) {}
     private record Cached(String fingerprint,Report report) {}
+    private record SegmentedExtraction(ModelGateway.StateExtraction value,int calls) {}
     private static final class FactAccumulator {
         String key,type,detail,state; int first,last; final LinkedHashSet<String> sources=new LinkedHashSet<>();
         final LinkedHashMap<String,ShadowEvidence> evidence=new LinkedHashMap<>();
@@ -116,7 +117,7 @@ public class HistoricalStructuredMemoryShadowService {
             long started=System.nanoTime(); int attempts=0; String error=null;
             StateExtractionPolicy.ValidatedState extracted=null;
             while(attempts<2&&extracted==null) {
-                attempts++; calls++;
+                attempts++;
                 try {
                     ContextAssembler.Context base=historicalContext(novel,artifact,aggregate(facts,entities,relations));
                     String instructions="只读重建第 "+chapter+" 章的历史状态；结果是可丢弃影子，不得视为正式档案。";
@@ -126,7 +127,14 @@ public class HistoricalStructuredMemoryShadowService {
                     request=compiler.compileStructuredMemoryShadow(request,AgentRole.STATE_EXTRACTOR);
                     ModelGateway.Generated candidate=new ModelGateway.Generated(version.title,version.content,version.summary,
                             List.of(),null);
-                    ModelGateway.StateExtraction proposed=model.extractState(request,candidate);
+                    ModelGateway.StateExtraction proposed;
+                    if(attempts==1) {
+                        calls++;
+                        proposed=model.extractState(request,candidate);
+                    } else {
+                        SegmentedExtraction segmented=segmentedExtraction(request,candidate);
+                        proposed=segmented.value(); calls+=segmented.calls();
+                    }
                     extracted=validations.validateAllBestEffort(candidate,proposed);
                     boolean proposedAny=!proposed.facts().isEmpty()||!proposed.entities().isEmpty()
                             ||!proposed.relations().isEmpty();
@@ -152,6 +160,43 @@ public class HistoricalStructuredMemoryShadowService {
         return new Report(status,true,"SELECTED_CONFIRMED_CHAPTERS_READ_ONLY",POLICY_VERSION,requestKey,
                 novel.revision,requested,calls,List.copyOf(results),aggregate(facts,entities,relations),
                 "结果只存在于当前服务进程的幂等缓存；不会写入正式记忆、投影、小说版本或确认记录");
+    }
+
+    private SegmentedExtraction segmentedExtraction(ModelGateway.Request request,
+            ModelGateway.Generated candidate) {
+        String base=request.instructions()==null?"":request.instructions()+"\n";
+        var factWorldRequest=new ModelGateway.Request(request.action(),request.novel(),request.target(),request.context(),
+                base+"本次是超长章节降级提取的第一段：facts 只返回 WORLD 和 CHARACTER 类型；"
+                        +"entities 和 relations 必须为空数组。只保留影响后续章节的关键状态。");
+        var factPlotRequest=new ModelGateway.Request(request.action(),request.novel(),request.target(),request.context(),
+                base+"本次是超长章节降级提取的第二段：facts 只返回 TIMELINE、EVENT 和 FORESHADOW 类型；"
+                        +"entities 和 relations 必须为空数组。不要枚举普通动作和氛围细节。");
+        var graphRequest=new ModelGateway.Request(request.action(),request.novel(),request.target(),request.context(),
+                base+"本次是超长章节降级提取的第三段：只返回 entities 和 relations；facts 必须为空数组。"
+                        +"relations 引用的两端实体必须同时出现在 entities 中。");
+        int[] calls={0};
+        ModelGateway.StateExtraction factWorldPart=extractSegment(factWorldRequest,candidate,calls);
+        ModelGateway.StateExtraction factPlotPart=extractSegment(factPlotRequest,candidate,calls);
+        ModelGateway.StateExtraction graphPart=extractSegment(graphRequest,candidate,calls);
+        List<ModelGateway.ExtractedState> facts=new ArrayList<>(factWorldPart.facts());
+        facts.addAll(factPlotPart.facts());
+        return new SegmentedExtraction(new ModelGateway.StateExtraction(List.copyOf(facts),graphPart.entities(),
+                graphPart.relations()),calls[0]);
+    }
+
+    private ModelGateway.StateExtraction extractSegment(ModelGateway.Request request,
+            ModelGateway.Generated candidate,int[] calls) {
+        calls[0]++;
+        try { return model.extractState(request,candidate); }
+        catch(Problem firstFailure) {
+            calls[0]++;
+            String instructions=(request.instructions()==null?"":request.instructions()+"\n")
+                    +"该分段上一次没有返回完整合法 JSON。仅重试本分段一次；减少条目，只保留最关键状态，"
+                    +"并确保三个数组与根对象完整闭合。";
+            var retry=new ModelGateway.Request(request.action(),request.novel(),request.target(),request.context(),
+                    instructions);
+            return model.extractState(retry,candidate);
+        }
     }
 
     private ContextAssembler.Context historicalContext(Novel novel,Artifact current,Aggregate aggregate) throws Exception {

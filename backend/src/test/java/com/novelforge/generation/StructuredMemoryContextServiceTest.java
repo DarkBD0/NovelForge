@@ -83,4 +83,39 @@ class StructuredMemoryContextServiceTest {
         assertThat(result.entities()).extracting("key").containsExactly("character_zhou_huilan");
         assertThat(result.usedChars()).isLessThanOrEqualTo(900);
     }
+
+    @Test void historicalSelectionKeepsRelevantVerifiedQuoteWithinBudget() throws Exception {
+        CanonService canon=mock(CanonService.class);
+        ObjectMapper mapper=new ObjectMapper();
+        var facts=new java.util.ArrayList<HistoricalStructuredMemoryShadowService.ShadowFact>();
+        for(int chapter=1;chapter<=80;chapter++) facts.add(new HistoricalStructuredMemoryShadowService.ShadowFact(
+                "filler_"+chapter,"EVENT","无关路人完成日常事务"+chapter,"ACTIVE",chapter,chapter,
+                List.of("chapter-"+chapter),List.of(new HistoricalStructuredMemoryShadowService.ShadowEvidence(
+                        "路人完成了第"+chapter+"项普通事务。","chapter-"+chapter,chapter))));
+        facts.add(new HistoricalStructuredMemoryShadowService.ShadowFact("duty_shift","EVENT",
+                "周海五年前雨夜在北门值夜班","ACTIVE",10,10,List.of("chapter-10"),List.of(
+                new HistoricalStructuredMemoryShadowService.ShadowEvidence(
+                        "夜间十点到次日清晨六点，周海，北门。","chapter-10",10))));
+        var aggregate=new HistoricalStructuredMemoryShadowService.Aggregate(
+                "MODEL_DERIVED_HISTORICAL_SHADOW",facts,List.of(),List.of(),"只读影子");
+        var service=new StructuredMemoryContextService(canon,mapper,1200,10,10);
+
+        var selected=service.selectHistorical(aggregate,"周海的值班时段是上午十点到下午六点吗？");
+
+        assertThat(selected.facts()).extracting("key").contains("duty_shift");
+        assertThat(mapper.writeValueAsString(selected).length()).isLessThanOrEqualTo(1200);
+        assertThat(selected.facts().size()).isLessThan(facts.size());
+
+        var focused=service.selectHistorical(aggregate,"周海的值班时段是上午十点到下午六点吗？",800);
+        assertThat(focused.facts()).extracting("key").contains("duty_shift");
+        assertThat(mapper.writeValueAsString(focused).length()).isLessThanOrEqualTo(800);
+
+        var evidenceFocus=service.focusHistoricalEvidence(aggregate,
+                "周海的值班时段是上午十点到下午六点吗？",3);
+        assertThat(evidenceFocus.facts()).hasSize(3);
+        assertThat(evidenceFocus.facts().getFirst().evidence()).singleElement().satisfies(evidence->
+                assertThat(evidence.quote()).isEqualTo("夜间十点到次日清晨六点，周海，北门。"));
+        assertThat(evidenceFocus.entities()).isEmpty();
+        assertThat(evidenceFocus.relations()).isEmpty();
+    }
 }
