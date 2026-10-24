@@ -35,10 +35,12 @@ class ConversationIntegrationTest {
         assertThat(replied.decisions).singleElement().satisfies(decision->
                 assertThat(decision.status).isEqualTo(DecisionStatus.PROPOSED));
         assertThat(replied.proposals).isEmpty();
+        assertThat(replied.turns.getLast().intent).isEqualTo("DISCUSS");
 
         ConversationDecision decision=replied.decisions.getFirst();
         conversations.decide(novel.id,session.id,decision.id,DecisionStatus.ACCEPTED);
         ConversationSession generated=conversations.send(novel.id,session.id,"[演示立即生成] 现在按已经确定的要求立即生成大纲");
+        assertThat(generated.turns.getLast().intent).isEqualTo("EXECUTE");
         ActionProposal proposal=generated.proposals.getFirst();
         assertThat(proposal.automaticExecution).isTrue();
         assertThat(proposal.status).isEqualTo(ProposalStatus.EXECUTED);
@@ -157,7 +159,54 @@ class ConversationIntegrationTest {
         });
     }
 
-    @Test void projectBriefProposalOnlyChangesMetadataAfterAuthorAcceptsAndAppliesIt() {
+    @Test void explicitRevisionInstructionStartsCandidateWithoutPerItemAcceptance() {
+        Novel novel=workflow.create("直接修改测试","验证对话要求进入正式候选",1000,"");
+        Task initial=tasks.submit(novel.id,Action.OUTLINE,null,"",Novel.uid(),novel.revision);
+        await().atMost(Duration.ofSeconds(10)).until(()->tasks.find(repository.get(novel.id),initial.id).status==TaskStatus.SUCCEEDED);
+        Novel withOutline=repository.get(novel.id);
+        Artifact outline=withOutline.artifacts.getFirst();
+        String approvedBefore=outline.approvedVersionId;
+        ConversationSession session=conversations.startOutline(novel.id,withOutline.revision);
+
+        ConversationSession replied=conversations.send(novel.id,session.id,"请修改第二幕，让主角主动设局，并保留原结局");
+
+        assertThat(replied.turns.getLast().intent).isEqualTo("DISCUSS");
+        assertThat(replied.decisions).allSatisfy(decision->assertThat(decision.status).isEqualTo(DecisionStatus.PROPOSED));
+        assertThat(replied.proposals).singleElement().satisfies(proposal->{
+            assertThat(proposal.automaticExecution).isTrue();
+            assertThat(proposal.status).isEqualTo(ProposalStatus.EXECUTED);
+            assertThat(proposal.taskId).isNotBlank();
+        });
+        Novel saved=repository.get(novel.id);
+        ConversationBrief brief=saved.conversationBriefs.getLast();
+        assertThat(brief.acceptedDecisions).anySatisfy(text->
+                assertThat(text).contains("作者本轮原始要求").contains("主角主动设局"));
+        assertThat(saved.artifacts.getFirst().approvedVersionId).isEqualTo(approvedBefore);
+    }
+
+    @Test void modelCannotTurnStoryRevisionIntoAnUnrequestedProjectMetadataChange() {
+        Novel novel=workflow.create("秋招测试","主角凭借重生信息差横扫秋招",1000,"保持节奏");
+        Task initial=tasks.submit(novel.id,Action.OUTLINE,null,"",Novel.uid(),novel.revision);
+        await().atMost(Duration.ofSeconds(10)).until(()->tasks.find(repository.get(novel.id),initial.id).status==TaskStatus.SUCCEEDED);
+        Novel withOutline=repository.get(novel.id);
+        ConversationSession session=conversations.startOutline(novel.id,withOutline.revision);
+
+        ConversationSession replied=conversations.send(novel.id,session.id,
+                "[演示模型误判资料] 这是纯粹的爽文，不解释重生原因，也不公开信息，请据此修改大纲");
+
+        assertThat(replied.projectUpdates).isEmpty();
+        assertThat(replied.proposals).singleElement().satisfies(proposal->{
+            assertThat(proposal.automaticExecution).isTrue();
+            assertThat(proposal.status).isEqualTo(ProposalStatus.EXECUTED);
+            assertThat(proposal.taskId).isNotBlank();
+        });
+        Novel saved=repository.get(novel.id);
+        assertThat(saved.requirements).isEqualTo("保持节奏");
+        assertThat(saved.conversationBriefs.getLast().acceptedDecisions)
+                .anySatisfy(text->assertThat(text).contains("不解释重生原因").contains("修改大纲"));
+    }
+
+    @Test void projectBriefProposalChangesMetadataOnlyAfterSingleBatchApproval() {
         Novel novel=workflow.create("消失在雨夜的人","记者追查一宗雨夜失踪案",1000,"结局必须明确");
         ConversationSession session=conversations.startOutline(novel.id,novel.revision);
         ConversationSession replied=conversations.send(novel.id,session.id,"[演示修改资料] 请把书名改得更简洁");
@@ -170,10 +219,6 @@ class ConversationIntegrationTest {
         assertThat(update.previousValue).isEqualTo("消失在雨夜的人");
         assertThat(update.proposedValue).isEqualTo("雨夜失踪者");
         assertThat(update.status).isEqualTo(ProjectUpdateStatus.PROPOSED);
-        assertThatThrownBy(()->conversations.applyProjectUpdates(novel.id,session.id,novel.revision))
-                .hasMessageContaining("先采纳至少一项");
-
-        conversations.decideProjectUpdate(novel.id,session.id,update.id,ProjectUpdateStatus.ACCEPTED);
         ConversationService.ProjectApplyResult result=conversations.applyProjectUpdates(novel.id,session.id,novel.revision);
         Novel saved=repository.get(novel.id);
 
@@ -223,7 +268,8 @@ class ConversationIntegrationTest {
     @Test void allSupportedProjectFieldsApplyAtomicallyAndTargetWordsUseBudgetAudit() {
         Novel novel=workflow.create("旧标题","旧简介",1000,"旧要求");
         ConversationSession session=conversations.startOutline(novel.id,novel.revision);
-        ConversationSession replied=conversations.send(novel.id,session.id,"[演示修改资料] 同时更新项目资料");
+        ConversationSession replied=conversations.send(novel.id,session.id,
+                "[演示修改资料] 修改书名、修改简介、修改补充要求、修改目标字数");
         assertThat(replied.projectUpdates).extracting(item->item.field)
                 .containsExactly(ProjectField.TITLE,ProjectField.SYNOPSIS,ProjectField.REQUIREMENTS,ProjectField.TARGET_WORDS);
         for (ProjectUpdateProposal update:replied.projectUpdates) {
@@ -244,6 +290,50 @@ class ConversationIntegrationTest {
             assertThat(change.newTarget()).isEqualTo(900);
             assertThat(change.previousMax()).isEqualTo(change.newMax());
         });
+    }
+
+    @Test void projectBriefBatchCanBeRejectedWithoutChangingNovel() {
+        Novel novel=workflow.create("保留原名","保留原简介",1000,"保留原要求");
+        ConversationSession session=conversations.startOutline(novel.id,novel.revision);
+        ConversationSession replied=conversations.send(novel.id,session.id,
+                "[演示修改资料] 修改书名、修改简介、修改补充要求、修改目标字数，先给我看修改前后");
+
+        ConversationSession rejected=conversations.rejectProjectUpdates(novel.id,session.id);
+        assertThat(rejected.projectUpdates).allSatisfy(update->assertThat(update.status).isEqualTo(ProjectUpdateStatus.REJECTED));
+        Novel saved=repository.get(novel.id);
+        assertThat(saved.title).isEqualTo("保留原名");
+        assertThat(saved.synopsis).isEqualTo("保留原简介");
+        assertThat(saved.requirements).isEqualTo("保留原要求");
+        assertThat(saved.targetWords).isEqualTo(1000);
+        assertThat(saved.revision).isZero();
+        assertThat(replied.projectUpdates).hasSize(4);
+    }
+
+    @Test void acceptingProjectUpdatesContinuesTheOutlineRequestWithoutASecondCommand() {
+        Novel novel=workflow.create("旧书名","旧简介",1000,"旧要求");
+        ConversationSession session=conversations.startOutline(novel.id,novel.revision);
+        ConversationSession replied=conversations.send(novel.id,session.id,
+                "[演示修改资料] 请先修改书名、修改简介、修改补充要求、修改目标字数，然后立即生成大纲");
+
+        assertThat(replied.projectUpdates).isNotEmpty();
+        assertThat(replied.proposals).singleElement().satisfies(proposal->{
+            assertThat(proposal.status).isEqualTo(ProposalStatus.DRAFT);
+            assertThat(proposal.automaticExecution).isFalse();
+        });
+
+        ConversationService.ProjectApplyResult applied=conversations.applyProjectUpdates(
+                novel.id,session.id,novel.revision);
+        ActionProposal continued=applied.session().proposals.stream()
+                .filter(proposal->proposal.status==ProposalStatus.EXECUTED).findFirst().orElseThrow();
+        await().atMost(Duration.ofSeconds(10)).until(()->{
+            TaskStatus status=tasks.find(repository.get(novel.id),continued.taskId).status;
+            return status!=TaskStatus.QUEUED&&status!=TaskStatus.RUNNING;
+        });
+
+        Novel saved=repository.get(novel.id);
+        assertThat(saved.title).isEqualTo("雨夜失踪者");
+        assertThat(tasks.find(saved,continued.taskId).status).isEqualTo(TaskStatus.SUCCEEDED);
+        assertThat(saved.artifacts).singleElement().satisfies(outline->assertThat(outline.kind).isEqualTo(Kind.OUTLINE));
     }
 
     @Test void generatedCandidateCanBeDismissedWithoutDeletingHistoryAndConversationCanContinue() {

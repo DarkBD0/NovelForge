@@ -1,10 +1,12 @@
 package com.novelforge.generation;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.novelforge.novel.Novel.Review;
 import com.novelforge.novel.Novel.ReviewIssue;
 import com.novelforge.novel.Novel.Fact;
@@ -43,13 +45,68 @@ final class ModelJsonReader {
                 require(node.path("issues").isArray(), "issues 必须是数组");
                 return type.cast(readReview(node));
             } else if (type == ChapterEvidenceAudit.class) {
+                // A chapter draft normally has no legacy fact claims. A missing empty
+                // claim list is safe to normalize: any expected nonempty claim will
+                // still be marked unsupported by the evidence verifier.
+                if(node instanceof ObjectNode object
+                        && (node.path("claimChecks").isMissingNode() || node.path("claimChecks").isNull()))
+                    object.set("claimChecks",mapper.createArrayNode());
                 validateEvidenceAudit(node);
+            } else if (type == PlanCausalityAudit.class) {
+                require(node.path("findings").isArray(),"findings 必须是数组（没有因果问题时使用 []）");
+                require(node.path("findings").size()<=8,"findings 最多八项");
+                List<PlanCausalityAudit.Finding> findings=new ArrayList<>();
+                for(JsonNode finding:node.path("findings")) {
+                    strings(finding,"location","problem","candidateQuote","basisQuote","suggestion","severity");
+                    require(List.of("必须修正","作者决定").contains(finding.path("severity").asText()),
+                            "severity 只能是必须修正或作者决定");
+                    findings.add(new PlanCausalityAudit.Finding(finding.path("location").textValue(),
+                            finding.path("problem").textValue(),finding.path("candidateQuote").textValue(),
+                            finding.path("basisQuote").textValue(),finding.path("suggestion").textValue(),
+                            finding.path("severity").textValue()));
+                }
+                // The audit is a narrow second opinion. Map only its validated fields;
+                // a provider's unrelated extra fields must not discard a saved plan.
+                return type.cast(new PlanCausalityAudit(findings));
             } else if (type == RewritePatch.class) {
                 normalizePatchPlanNumbers(node);
                 validatePatch(node);
             } else if (type == ModelGateway.Generated.class) {
-                strings(node, "title");
                 List<String> draftIssues=new ArrayList<>();
+                if(node instanceof ObjectNode object) {
+                    // Some models return the requested plan object directly instead of
+                    // its generated-content envelope. Only recognize the unambiguous
+                    // top-level plan shape; the ordinary plan validator still runs below.
+                    if(!object.has("plan") && object.has("startChapter") && object.has("chapters")) {
+                        ObjectNode envelope=mapper.createObjectNode();
+                        envelope.set("plan",object.deepCopy());
+                        for(String field:List.of("title","content","summary","facts"))
+                            if(object.has(field)) envelope.set(field,object.get(field));
+                        node=envelope;
+                        object=envelope;
+                    }
+                    JsonNode titleNode=object.path("title");
+                    if(titleNode.isMissingNode() || titleNode.isNull()
+                            || titleNode.isTextual() && titleNode.asText().isBlank()) {
+                        JsonNode planNode=object.path("plan");
+                        if(planNode.isObject() && planNode.path("startChapter").canConvertToInt()
+                                && planNode.path("endChapter").canConvertToInt())
+                            object.put("title","第"+planNode.path("startChapter").asInt()+"章至第"
+                                    +planNode.path("endChapter").asInt()+"章章节规划");
+                        else if(object.path("outlineSpec").isObject()) object.put("title","全书大纲");
+                        else {
+                            object.put("title","待命名草稿");
+                            draftIssues.add("标题缺失或为空，请补全标题后重新检查");
+                        }
+                    }
+                    // A chapter plan never writes the fact ledger. Ignore model-supplied
+                    // fact fragments instead of losing an otherwise complete plan.
+                    if(object.path("plan").isObject()) object.set("facts",mapper.createArrayNode());
+                    else if(object.path("outlineSpec").isObject()
+                            && (object.path("facts").isMissingNode() || object.path("facts").isNull()))
+                        object.set("facts",mapper.createArrayNode());
+                }
+                strings(node, "title");
                 JsonNode summaryNode=node.path("summary");
                 String summary=summaryNode.isTextual()?summaryNode.textValue():"";
                 if (summary.isBlank()) draftIssues.add("内容摘要缺失或为空，请补全摘要后重新检查");
@@ -62,17 +119,21 @@ final class ModelJsonReader {
                 require(!node.has("outlineSpec") || node.path("outlineSpec").isNull() || node.path("outlineSpec").isObject(),
                         "outlineSpec 必须是对象或 null");
                 normalizePlanNumbers(node.path("plan"));
-                if (node.path("plan").isObject()) validatePlan(node.path("plan"));
+                if (node.path("plan").isObject()) {
+                    normalizeCriticalTransitions((ObjectNode)node.path("plan"));
+                    validatePlan(node.path("plan"));
+                }
                 List<Fact> facts=new ArrayList<>();
                 if (factsNode.isArray()) for (JsonNode fact : factsNode) facts.add(mapper.treeToValue(fact,Fact.class));
                 Plan plan=node.path("plan").isObject()?mapper.treeToValue(node.path("plan"),Plan.class):null;
                 String content=node.path("content").isTextual()?node.path("content").textValue():"";
-                if (content.isBlank() && plan!=null) content=renderPlan(plan);
+                if (content.isBlank() && plan!=null) content=PlanNarrativeRenderer.render(plan);
                 require(!content.isBlank(),"content 必须是非空文本");
                 OutlineSpec outlineSpec=node.path("outlineSpec").isObject()
                         ?mapper.treeToValue(node.path("outlineSpec"),OutlineSpec.class):null;
-                return type.cast(new ModelGateway.Generated(node.path("title").textValue(),content,
-                        summary,facts,plan,outlineSpec,draftIssues));
+                ModelGateway.Generated generated=new ModelGateway.Generated(node.path("title").textValue(),content,
+                        summary,facts,plan,outlineSpec,draftIssues);
+                return type.cast(plan==null?generated:PlanNarrativeRenderer.normalize(generated));
             } else if (type == ModelGateway.StateExtraction.class) {
                 require(node.path("facts").isArray(),"facts 必须是数组（没有状态变化时使用 []）");
                 for(JsonNode fact:node.path("facts")) {
@@ -101,6 +162,10 @@ final class ModelJsonReader {
                 }
             } else if (type == ModelGateway.DialogueResponse.class) {
                 strings(node,"reply");
+                JsonNode intent=node.path("intent");
+                require(intent.isMissingNode()||intent.isTextual(),"intent 必须是文本");
+                if (intent.isTextual()) require(List.of("DISCUSS","EXECUTE","UNCLEAR").contains(intent.asText()),
+                        "intent 不受支持");
                 require(node.path("decisionCandidates").isArray(),"decisionCandidates 必须是数组");
                 for (JsonNode decision:node.path("decisionCandidates")) {
                     strings(decision,"type","text");
@@ -129,7 +194,14 @@ final class ModelJsonReader {
             }
             return mapper.treeToValue(node, type);
         } catch (JsonProcessingException e) {
-            throw error("模型 JSON 解析失败：语法、重复字段或字段类型不符合约定");
+            String kind=e.getClass().getSimpleName();
+            String field=e instanceof JsonMappingException mapping && !mapping.getPath().isEmpty()
+                    ? mapping.getPath().stream().map(ref->ref.getFieldName()==null?"["+ref.getIndex()+"]":ref.getFieldName())
+                        .limit(6).reduce((left,right)->left+"."+right).orElse("") : "";
+            var location=e.getLocation();
+            String position=location==null?"":"，位置="+location.getLineNr()+":"+location.getColumnNr();
+            throw error("模型 JSON 解析失败：语法、重复字段或字段类型不符合约定（类型="+kind
+                    +(field.isBlank()?"":"，字段="+field)+position+"）");
         }
     }
 
@@ -172,6 +244,7 @@ final class ModelJsonReader {
                 }
                 case "SET_PLAN" -> {
                     require(operation.path("plan").isObject(),"SET_PLAN.plan 必须是对象");
+                    normalizeCriticalTransitions((ObjectNode)operation.path("plan"));
                     validatePlan(operation.path("plan"));
                 }
                 default -> require(false,"未知修订操作 "+operation.path("op").asText());
@@ -330,6 +403,18 @@ final class ModelJsonReader {
         strings(plan, "triggerReason", "handoff");
         require(plan.path("assumptions").isTextual(), "plan.assumptions 必须是文本");
         require(plan.path("chapters").isArray(), "plan.chapters 必须是数组");
+        JsonNode transitions=plan.path("criticalTransitions");
+        if(!transitions.isMissingNode() && !transitions.isNull()) {
+            require(transitions.isArray() && transitions.size()<=24,
+                    "关键状态变化最多24条；普通生活细节不需要记录");
+            for(JsonNode transition:transitions) {
+                require(transition.path("chapterNumber").isIntegralNumber()
+                        && transition.path("chapterNumber").canConvertToInt(),"关键状态变化的章节编号必须是整数");
+                strings(transition,"subject","before","change","after","visibility","evidenceTime","inferenceBoundary");
+                require(List.of("正文发生","章外发生","延后揭露").contains(transition.path("visibility").asText()),
+                        "关键状态变化的呈现方式不受支持");
+            }
+        }
         for (JsonNode chapter : plan.path("chapters")) {
             require(chapter.path("number").isIntegralNumber() && chapter.path("number").canConvertToInt(), "章节 number 必须是整数");
             strings(chapter, "title", "purpose");
@@ -339,8 +424,8 @@ final class ModelJsonReader {
             if (chapter.has("sceneBeats") && !chapter.path("sceneBeats").isNull()) {
                 // An empty array is the serialized form of a legacy three-field
                 // ChapterBeat and intentionally falls back to the purpose text.
-                require(chapter.path("sceneBeats").isArray() && chapter.path("sceneBeats").size()<=4,
-                        "章节 sceneBeats 最多包含4个场景节点");
+                require(chapter.path("sceneBeats").isArray() && chapter.path("sceneBeats").size()<=8,
+                        "章节 sceneBeats 最多包含8个场景节点");
                 for (JsonNode scene : chapter.path("sceneBeats")) require(scene.isTextual()&&!scene.asText().isBlank(),"场景节点必须是非空文本");
             }
             for (String field : List.of("revealBoundary","endingHook"))
@@ -348,25 +433,30 @@ final class ModelJsonReader {
                     require(chapter.path(field).isTextual(),"章节 "+field+" 必须是文本");
         }
     }
-    private String renderPlan(Plan plan) {
-        StringBuilder text=new StringBuilder("第").append(plan.startChapter).append("章至第")
-                .append(plan.endChapter).append("章章节规划");
-        for (var chapter:plan.chapters) {
-            text.append("\n\n第").append(chapter.number()).append("章 ").append(chapter.title())
-                    .append("\n核心变化：").append(chapter.purpose());
-            if (chapter.targetWords()!=null) text.append("\n建议字数：").append(chapter.targetWords()).append("字");
-            if (!chapter.sceneBeats().isEmpty()) {
-                text.append("\n场景节点：");
-                for (int i=0;i<chapter.sceneBeats().size();i++)
-                    text.append("\n").append(i+1).append(". ").append(chapter.sceneBeats().get(i));
-            }
-            if (!chapter.revealBoundary().isBlank()) text.append("\n揭示边界：").append(chapter.revealBoundary());
-            if (!chapter.endingHook().isBlank()) text.append("\n章末局面：").append(chapter.endingHook());
+
+    /** Internal planning hints are optional; malformed hints must not destroy a complete chapter plan. */
+    private void normalizeCriticalTransitions(ObjectNode plan) {
+        JsonNode raw=plan.path("criticalTransitions");
+        ArrayNode valid=mapper.createArrayNode();
+        if(raw.isArray()) for(JsonNode entry:raw) {
+            if(valid.size()>=24) break;
+            if(!entry.path("chapterNumber").isIntegralNumber()
+                    || !entry.path("chapterNumber").canConvertToInt()) continue;
+            boolean complete=true;
+            for(String field:List.of("subject","before","change","after","visibility","evidenceTime"))
+                if(!entry.path(field).isTextual() || entry.path(field).asText().isBlank()) complete=false;
+            if(!complete || !List.of("正文发生","章外发生","延后揭露")
+                    .contains(entry.path("visibility").asText())) continue;
+            ObjectNode cleaned=mapper.createObjectNode();
+            cleaned.put("chapterNumber",entry.path("chapterNumber").asInt());
+            for(String field:List.of("subject","before","change","after","visibility","evidenceTime"))
+                cleaned.put(field,entry.path(field).asText());
+            cleaned.put("inferenceBoundary",entry.path("inferenceBoundary").isTextual()
+                    && !entry.path("inferenceBoundary").asText().isBlank()
+                    ?entry.path("inferenceBoundary").asText():"不适用");
+            valid.add(cleaned);
         }
-        text.append("\n\n批次衔接：").append(plan.handoff);
-        if (!plan.triggerReason.isBlank()) text.append("\n下一批触发：").append(plan.triggerReason);
-        if (!plan.assumptions.isBlank()) text.append("\n待复核假设：").append(plan.assumptions);
-        return text.toString();
+        plan.set("criticalTransitions",valid);
     }
     private void strings(JsonNode node, String... fields) {
         for (String field : fields)

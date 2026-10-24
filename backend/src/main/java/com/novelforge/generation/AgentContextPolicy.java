@@ -14,11 +14,15 @@ public class AgentContextPolicy {
     public enum Section {
         PROJECT_BRIEF,
         CONVERSATION_BRIEF,
+        OUTLINE_REVISION_BOUNDARY,
         STATE_MODEL,
         WORD_BUDGET,
         FORMAL_CANON,
+        KNOWN_IDENTITIES,
         STRUCTURED_MEMORY,
         CURRENT_PLAN,
+        PLAN_COMPARISON,
+        PLAN_STORY_ENGINE,
         CHAPTER_BRIEF,
         CONFIRMED_DESIGN,
         HISTORICAL_SUMMARIES,
@@ -42,34 +46,41 @@ public class AgentContextPolicy {
             case CREATIVE_DIALOGUE -> access(0,Section.PROJECT_BRIEF,Section.CONVERSATION_BRIEF,
                     Section.STATE_MODEL,Section.CONFIRMED_DESIGN,Section.REVISION_TARGET);
             case STORY_ARCHITECT -> access(0,Section.PROJECT_BRIEF,Section.CONVERSATION_BRIEF,
-                    Section.STATE_MODEL,Section.WORD_BUDGET,Section.CONFIRMED_DESIGN,Section.REVISION_TARGET,
+                    Section.OUTLINE_REVISION_BOUNDARY,Section.STATE_MODEL,Section.WORD_BUDGET,Section.CONFIRMED_DESIGN,Section.REVISION_TARGET,
                     Section.REPAIR_REASONS,Section.UPSTREAM_AGENT_OUTPUT);
             case CHARACTER_WORLD_DESIGNER -> access(0,Section.PROJECT_BRIEF,Section.STATE_MODEL,
                     Section.WORD_BUDGET,Section.CONFIRMED_DESIGN);
             case ROLLING_PLANNER -> access(3,Section.PROJECT_BRIEF,Section.STATE_MODEL,Section.WORD_BUDGET,
-                    Section.FORMAL_CANON,Section.CURRENT_PLAN,Section.CONFIRMED_DESIGN,Section.HISTORICAL_SUMMARIES,
+                    Section.FORMAL_CANON,Section.CURRENT_PLAN,Section.PLAN_COMPARISON,Section.PLAN_STORY_ENGINE,
+                    Section.CONFIRMED_DESIGN,Section.HISTORICAL_SUMMARIES,
                     Section.RECENT_CHAPTER_TEXT,Section.RETRIEVED_HISTORY,Section.REVISION_TARGET,Section.REPAIR_REASONS);
             case CHAPTER_WRITER -> access(3,Section.PROJECT_BRIEF,Section.STATE_MODEL,Section.WORD_BUDGET,
                     Section.FORMAL_CANON,Section.CURRENT_PLAN,Section.CHAPTER_BRIEF,Section.CONFIRMED_DESIGN,
                     Section.HISTORICAL_SUMMARIES,Section.RECENT_CHAPTER_TEXT,Section.RETRIEVED_HISTORY);
             case CONTENT_REVISER -> access(3,Section.PROJECT_BRIEF,Section.STATE_MODEL,Section.WORD_BUDGET,
-                    Section.FORMAL_CANON,Section.CURRENT_PLAN,Section.CHAPTER_BRIEF,Section.CONFIRMED_DESIGN,
+                    Section.FORMAL_CANON,Section.CURRENT_PLAN,Section.PLAN_COMPARISON,Section.PLAN_STORY_ENGINE,
+                    Section.CHAPTER_BRIEF,Section.CONFIRMED_DESIGN,
                     Section.HISTORICAL_SUMMARIES,Section.RECENT_CHAPTER_TEXT,Section.RETRIEVED_HISTORY,
                     Section.REVISION_TARGET,Section.REPAIR_REASONS);
             case STYLE_EDITOR -> access(0,Section.PROJECT_BRIEF,Section.STATE_MODEL,Section.FORMAL_CANON,
                     Section.CURRENT_PLAN,Section.CHAPTER_BRIEF,Section.REVISION_TARGET,Section.REPAIR_REASONS);
-            case CONTENT_AUDITOR, CONTINUITY_AUDITOR, PLOT_FORESHADOW_AUDITOR -> access(3,
+            case CONTENT_AUDITOR -> access(3,
                     Section.PROJECT_BRIEF,Section.STATE_MODEL,Section.FORMAL_CANON,Section.CURRENT_PLAN,
-                    Section.CHAPTER_BRIEF,Section.CONFIRMED_DESIGN,Section.HISTORICAL_SUMMARIES,
+                    Section.PLAN_COMPARISON,Section.PLAN_STORY_ENGINE,Section.CHAPTER_BRIEF,Section.CONFIRMED_DESIGN,Section.HISTORICAL_SUMMARIES,
                     Section.RECENT_CHAPTER_TEXT,Section.RETRIEVED_HISTORY,Section.REVISION_TARGET);
+            case CONTINUITY_AUDITOR, PLOT_FORESHADOW_AUDITOR -> access(3,
+                    Section.PROJECT_BRIEF,Section.CONVERSATION_BRIEF,Section.OUTLINE_REVISION_BOUNDARY,Section.STATE_MODEL,Section.FORMAL_CANON,
+                    Section.CURRENT_PLAN,Section.PLAN_COMPARISON,Section.CHAPTER_BRIEF,Section.CONFIRMED_DESIGN,
+                    Section.HISTORICAL_SUMMARIES,Section.RECENT_CHAPTER_TEXT,Section.RETRIEVED_HISTORY,
+                    Section.REVISION_TARGET);
             case STYLE_AUDITOR -> access(0,Section.PROJECT_BRIEF,Section.STATE_MODEL,Section.FORMAL_CANON,
                     Section.CURRENT_PLAN,Section.CHAPTER_BRIEF,Section.REVISION_TARGET);
             case STATE_EXTRACTOR -> access(0,Section.PROJECT_BRIEF,Section.STATE_MODEL,Section.FORMAL_CANON,
-                    Section.CURRENT_PLAN,Section.CHAPTER_BRIEF,Section.CONFIRMED_DESIGN,
+                    Section.KNOWN_IDENTITIES,Section.CURRENT_PLAN,Section.CHAPTER_BRIEF,Section.CONFIRMED_DESIGN,
                     Section.HISTORICAL_SUMMARIES);
-            case COMPLETION_AUDITOR -> access(0,Section.PROJECT_BRIEF,Section.STATE_MODEL,Section.WORD_BUDGET,
+            case COMPLETION_AUDITOR -> access(2,Section.PROJECT_BRIEF,Section.STATE_MODEL,Section.WORD_BUDGET,
                     Section.FORMAL_CANON,Section.CONFIRMED_DESIGN,Section.HISTORICAL_SUMMARIES,
-                    Section.RETRIEVED_HISTORY);
+                    Section.RECENT_CHAPTER_TEXT,Section.RETRIEVED_HISTORY);
         };
     }
 

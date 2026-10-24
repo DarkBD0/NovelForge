@@ -23,26 +23,21 @@ public class ReviewConvergence {
         List<ReviewIssue> previousDetails=previous==null||previous.issueDetails()==null
                 ? List.of() : previous.issueDetails();
         List<ReviewIssue> identified=new ArrayList<>();
-        boolean downgraded=false;
         for (ReviewIssue issue:current.issueDetails()) {
             ReviewIssue matched=bestMatch(issue,previousDetails);
             String id=matched==null ? stableId(issue) : idOf(matched);
             boolean repeatedBlocking=matched!=null && "必须修正".equals(issue.severity())
                     && "必须修正".equals(matched.severity());
             if (guidedFixRound>=2 && repeatedBlocking) {
-                downgraded=true;
                 identified.add(new ReviewIssue(id,issue.location(),issue.problem(),issue.evidence(),
-                        authorDecisionSuggestion(issue.suggestion()),"作者决定"));
+                        manualRepairSuggestion(issue.suggestion()),"必须修正"));
             } else {
                 identified.add(new ReviewIssue(id,issue.location(),issue.problem(),issue.evidence(),
                         issue.suggestion(),issue.severity()));
             }
         }
-        boolean passed=downgraded
-                ? identified.stream().noneMatch(issue->"必须修正".equals(issue.severity()))
-                : current.passed();
         List<String> texts=identified.stream().map(ReviewIssue::text).toList();
-        return new Review(passed,texts,current.mainlineResolved(),current.endingClear(),
+        return new Review(current.passed(),texts,current.mainlineResolved(),current.endingClear(),
                 current.foreshadowingResolved(),identified);
     }
 
@@ -74,9 +69,10 @@ public class ReviewConvergence {
         return usefulLocation && location>=.20 && (problem>=.12 || evidence>=.16 || combined>=.18);
     }
 
-    private String authorDecisionSuggestion(String suggestion) {
-        String suffix="同一问题经过两轮自动修订后仍被报告，系统已停止自动循环；请作者阅读当前版本后决定确认或手动修改。";
-        return suggestion.contains("两轮自动修订")?suggestion:suggestion+" "+suffix;
+    private String manualRepairSuggestion(String suggestion) {
+        String suffix="同一问题经过两轮定点修订后仍未解决，系统已停止继续自动修订；请手动修改，或在确认这是误报后填写人工复核理由。";
+        return suggestion.contains("两轮定点修订") || suggestion.contains("两轮自动修订")
+                ? suggestion : suggestion+" "+suffix;
     }
 
     private ReviewIssue bestMatch(ReviewIssue current,List<ReviewIssue> previous) {

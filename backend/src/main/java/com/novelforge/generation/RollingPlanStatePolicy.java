@@ -25,6 +25,7 @@ public class RollingPlanStatePolicy {
                         ModelGateway.Generated candidate, Review review) {
         if (target==null || target.kind!=Kind.PLAN || action!=Action.REWRITE || !target.needsRevision
                 || target.approved()==null || candidate==null || candidate.plan()==null
+                || PlanRevisionMode.resolve(novel,action,target)==PlanRevisionMode.Mode.UPSTREAM_REPLAN
                 || EXPLICIT_REPLAN.matcher(instructions==null?"":instructions).find()) return review;
         Plan approved=target.approved().plan, proposed=candidate.plan();
         List<String> changes=protectedChanges(approved,proposed);

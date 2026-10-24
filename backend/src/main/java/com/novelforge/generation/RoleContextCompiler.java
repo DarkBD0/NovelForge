@@ -77,15 +77,19 @@ public class RoleContextCompiler {
                     &&expectedPolicy.equals(input.path("agentContext").path("policyVersion").asText())) return request;
             Access access=structuredMemoryShadow?policies.forStructuredMemoryShadow(role):policies.forRole(role);
             ObjectNode output=mapper.createObjectNode();
-            copy(input,output,access,Section.PROJECT_BRIEF,"title","synopsis","requirements");
+            copy(input,output,access,Section.PROJECT_BRIEF,"title","synopsis","requirements","requirementAuthority","genreContract");
             copy(input,output,access,Section.CONVERSATION_BRIEF,"conversationBrief");
+            copy(input,output,access,Section.OUTLINE_REVISION_BOUNDARY,"outlineRevisionBoundary");
             copy(input,output,access,Section.STATE_MODEL,"stateModel","planningState");
             copy(input,output,access,Section.WORD_BUDGET,"targetWords","approvedMaxWords","confirmedWords",
                     "nextChapter","nextBatch","remainingWordsToTarget","remainingWordsToApprovedMax");
             copy(input,output,access,Section.FORMAL_CANON,"canonBeforeChapter");
+            copy(input,output,access,Section.KNOWN_IDENTITIES,"knownIdentityHints");
             copy(input,output,access,Section.STRUCTURED_MEMORY,"formalStructuredMemory");
             copy(input,output,access,Section.CURRENT_PLAN,"currentChapterPlan","nextBatchStartChapter",
                     "unwrittenChapterBeforeNewBatch","planningBoundaryNote");
+            copy(input,output,access,Section.PLAN_COMPARISON,"planComparison");
+            copy(input,output,access,Section.PLAN_STORY_ENGINE,"planStoryEngine");
             copy(input,output,access,Section.CHAPTER_BRIEF,"chapterBrief");
             copy(input,output,access,Section.HISTORICAL_SUMMARIES,"previousChapterSummary");
             copy(input,output,access,Section.RETRIEVED_HISTORY,"retrievedConfirmedHistory");

@@ -36,6 +36,18 @@ class OutlineImpactAnalyzerTest {
         assertThat(scope.changedSections()).containsExactly("伏笔");
     }
 
+    @Test void attractionChangeNeedsPlotRecheckOnly() {
+        OutlineSpec before=OutlineTestFixtures.validSpec(1000,"主线");
+        OutlineSpec after=OutlineTestFixtures.validSpec(1000,"主线");
+        after.readerAttraction="每次取证都会揭开一层更危险的真相";
+
+        var scope=analyzer.analyze(before,after);
+
+        assertThat(scope.continuityRequired()).isFalse();
+        assertThat(scope.plotRequired()).isTrue();
+        assertThat(scope.changedSections()).containsExactly("核心吸引点");
+    }
+
     @Test void eventChangeConservativelyRechecksBothAuditors() {
         OutlineSpec before=OutlineTestFixtures.validSpec(1000,"主线");
         OutlineSpec after=OutlineTestFixtures.validSpec(1000,"主线");

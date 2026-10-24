@@ -45,6 +45,27 @@ class ModelJsonReaderRecoveryTest {
                 .isInstanceOf(Problem.class).hasMessageContaining("多个 JSON 片段");
     }
 
+    @Test void causalAuditReadsOnlyValidatedFindingFields() {
+        String json="""
+                {"findings":[{"location":"第二章","problem":"年份没有依据",
+                  "candidateQuote":"她把两个年份在心里摆了一下",
+                  "basisQuote":"照片上没有日期",
+                  "suggestion":"删除无依据的年份比较","severity":"必须修正",
+                  "extraProviderField":{"unexpected":[1,2]}}],
+                 "extraProviderSummary":{"confidence":0.8}}
+                """;
+
+        PlanCausalityAudit audit=reader.read(json,PlanCausalityAudit.class);
+
+        assertThat(audit.findings()).singleElement().satisfies(finding->{
+            assertThat(finding.problem()).isEqualTo("年份没有依据");
+            assertThat(finding.severity()).isEqualTo("必须修正");
+        });
+        assertThatThrownBy(()->reader.read(json.replace("\"basisQuote\":\"照片上没有日期\"",
+                        "\"basisQuote\":[\"照片上没有日期\"]"),PlanCausalityAudit.class))
+                .isInstanceOf(Problem.class).hasMessageContaining("basisQuote 必须是非空文本");
+    }
+
     @Test void acceptsLargeAtomicFactSplitButKeepsABoundedPatch() {
         String maximum=IntStream.range(0,ModelJsonReader.MAX_PATCH_OPERATIONS)
                 .mapToObj(index->"{\"op\":\"DELETE_FACT\",\"key\":\"fact_"+index+"\"}")
@@ -76,6 +97,44 @@ class ModelJsonReaderRecoveryTest {
         assertThat(generated.plan()).isNotNull();
     }
 
+    @Test void derivesPlanTitleAndEmptyFactsWithoutDiscardingValidPlan() {
+        String json="""
+                {"plan":{"startChapter":1,"endChapter":1,"prepareNextAfterChapter":1,"finalBatch":true,
+                  "triggerReason":"短篇收束","handoff":"结局完成","assumptions":"",
+                  "chapters":[{"number":1,"title":"旧照","purpose":"顾乔找到失踪者去向"}]}}
+                """;
+
+        ModelGateway.Generated generated=reader.read(json,ModelGateway.Generated.class);
+
+        assertThat(generated.title()).isEqualTo("第1章至第1章章节规划");
+        assertThat(generated.plan()).isNotNull();
+        assertThat(generated.content()).contains("顾乔找到失踪者去向");
+        assertThat(generated.summary()).contains("第1章旧照");
+        assertThat(generated.facts()).isEmpty();
+        assertThat(generated.draftIssues()).isEmpty();
+    }
+
+    @Test void acceptsRootPlanObjectButStillValidatesItsRequiredFields() {
+        String json="""
+                {"startChapter":1,"endChapter":1,"prepareNextAfterChapter":1,"finalBatch":true,
+                 "triggerReason":"短篇收束","handoff":"结局完成","assumptions":"",
+                 "chapters":[{"number":1,"title":"旧照","purpose":"顾乔找到失踪者去向"}]}
+                """;
+
+        assertThat(reader.read(json,ModelGateway.Generated.class).plan()).isNotNull();
+        assertThatThrownBy(()->reader.read(json.replace("\"endChapter\":1,", ""),ModelGateway.Generated.class))
+                .isInstanceOf(Problem.class).hasMessageContaining("plan.endChapter 必须是整数");
+    }
+
+    @Test void missingProseTitleKeepsDraftIncompleteRatherThanDiscardingContent() {
+        ModelGateway.Generated generated=reader.read("{\"content\":\"她推开门，看见桌上的旧照。\",\"summary\":\"发现旧照\",\"facts\":[]}",
+                ModelGateway.Generated.class);
+
+        assertThat(generated.content()).contains("旧照");
+        assertThat(generated.title()).isEqualTo("待命名草稿");
+        assertThat(generated.draftIssues()).contains("标题缺失或为空，请补全标题后重新检查");
+    }
+
     @Test void suppliesNeutralSuggestionForOtherwiseCompleteReviewFinding() {
         String json="""
                 {"passed":false,"issues":[{"location":"当前正文","problem":"时间冲突",
@@ -86,5 +145,13 @@ class ModelJsonReaderRecoveryTest {
 
         assertThat(review.issueDetails()).singleElement().satisfies(issue->
                 assertThat(issue.suggestion()).isEqualTo("请由作者核对后修改"));
+    }
+
+    @Test void missingEmptyClaimChecksDoNotDiscardAValidChapterAudit() {
+        ChapterEvidenceAudit audit=reader.read("{\"planChecks\":[]}",ChapterEvidenceAudit.class);
+        assertThat(audit.planChecks()).isEmpty();
+        assertThat(audit.claimChecks()).isEmpty();
+        assertThatThrownBy(()->reader.read("{\"planChecks\":[],\"claimChecks\":\"wrong\"}",
+                ChapterEvidenceAudit.class)).isInstanceOf(Problem.class).hasMessageContaining("claimChecks 必须是数组");
     }
 }

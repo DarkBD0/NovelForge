@@ -12,7 +12,7 @@ import java.util.regex.Pattern;
 @Component
 public class ReviewPolicy {
     /** Persisted with every report so upgraded checking rules make older reports visibly stale. */
-    public static final String VERSION="2026-10-08-v8";
+    public static final String VERSION="2026-10-24-v26";
 
     private static final Pattern QUOTED=Pattern.compile("[‘“\"']([^’”\"']{4,})[’”\"']");
     private static final Pattern CURRENT_TEXT_CLAIM=Pattern.compile("候选原文|当前(?:候选)?原文|正文原文|(当前|候选|正文|摘要|档案|标题|文中|同段|一句).{0,24}(写|说|表述|出现|包含|使用|声明)");

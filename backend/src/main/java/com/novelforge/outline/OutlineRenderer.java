@@ -8,44 +8,61 @@ public class OutlineRenderer {
     public String render(OutlineSpec spec) {
         StringBuilder out=new StringBuilder();
         section(out,"故事核心",spec.storyCore);
+        sectionIfPresent(out,"核心吸引点",spec.readerAttraction);
+        sectionIfPresent(out,"开篇首次兑现",spec.openingPayoff);
         section(out,"题材与叙事基调",spec.genreTone);
         section(out,"主角目标",spec.protagonistGoal);
         section(out,"核心冲突",spec.coreConflict);
-        section(out,"明确结局",spec.endingContract);
 
-        out.append("\n## 世界规则\n");
-        for (OutlineSpec.WorldRule rule:safe(spec.worldRules)) {
-            out.append("- ").append(text(rule.rule));
-            appendDetail(out,"适用范围",rule.scope); appendDetail(out,"限制",rule.limit);
-            appendDetail(out,"代价",rule.cost); appendDetail(out,"例外",rule.exceptionRule);
-            out.append('\n');
+        if (!safe(spec.worldRules).isEmpty()) {
+            out.append("\n## 世界与核心规则\n");
+            for (OutlineSpec.WorldRule rule:safe(spec.worldRules)) {
+                out.append("- ").append(text(rule.rule));
+                appendDetail(out,"适用范围",rule.scope); appendDetail(out,"限制",rule.limit);
+                appendDetail(out,"代价",rule.cost); appendDetail(out,"例外",rule.exceptionRule);
+                out.append('\n');
+            }
         }
 
-        out.append("\n## 核心人物骨架\n");
+        out.append("\n## 核心人物\n");
         for (OutlineSpec.CharacterArc person:safe(spec.characters)) {
+            if ("FUNCTIONAL_NPC".equals(person.roleTier)) continue;
             out.append("### ").append(text(person.name)).append('\n');
             line(out,"剧情功能",person.storyFunction); line(out,"核心目标",person.goal);
             line(out,"深层动机",person.motivation); line(out,"关键缺陷",person.flaw);
             line(out,"关键选择",person.keyChoice); line(out,"变化方向",person.arcDirection);
             line(out,"最终状态",person.finalState);
         }
+        var functional=safe(spec.characters).stream().filter(person->"FUNCTIONAL_NPC".equals(person.roleTier)).toList();
+        if (!functional.isEmpty()) {
+            out.append("\n## 功能性人物\n");
+            for (OutlineSpec.CharacterArc person:functional)
+                out.append("- ").append(text(person.name)).append("：").append(text(person.storyFunction)).append('\n');
+        }
 
         out.append("\n## 全书结构\n");
+        boolean singlePart=safe(spec.parts).size()==1;
         int partNumber=0;
         for (OutlineSpec.StoryPart part:safe(spec.parts)) {
             partNumber++;
-            out.append("### 第").append(partNumber).append("部分：").append(text(part.title));
+            if (singlePart) out.append("### ").append(text(part.title));
+            else out.append("### 第").append(partNumber).append("部分：").append(text(part.title));
             if (part.estimatedWords>0) out.append("（预计").append(part.estimatedWords).append("字）");
             out.append('\n');
-            line(out,"阶段目标",part.goal); line(out,"主要冲突",part.conflict); line(out,"关键转折",part.turn);
+            line(out,singlePart?"全书目标":"阶段目标",part.goal); line(out,"主要冲突",part.conflict); line(out,"关键转折",part.turn);
             int stageNumber=0;
             for (OutlineSpec.StoryStage stage:safe(part.stages)) {
                 stageNumber++;
-                out.append("#### ").append(partNumber).append('.').append(stageNumber).append(' ')
-                        .append(text(stage.title));
+                out.append("#### ");
+                if (!singlePart) out.append(partNumber).append('.');
+                out.append(stageNumber).append(' ').append(text(stage.title));
                 if (stage.estimatedWords>0) out.append("（预计").append(stage.estimatedWords).append("字）");
                 out.append('\n');
                 line(out,"目标",stage.goal);
+                line(out,"读者期待",stage.readerPayoff);
+                if ("3".equals(spec.schemaVersion)) line(out,"阻力与抉择",stage.dramaticTurn);
+                line(out,"阶段兑现",stage.payoffResult);
+                line(out,"3".equals(spec.schemaVersion)?"后续变化":"下一步升级",stage.escalation);
                 for (OutlineSpec.KeyEvent event:safe(stage.events)) {
                     out.append("- ").append(text(event.title)).append("：").append(text(event.event));
                     appendDetail(out,"后果",event.consequence); appendDetail(out,"人物变化",event.characterChange);
@@ -64,15 +81,15 @@ public class OutlineRenderer {
                 out.append("- ").append(text(thread.title)).append("：").append(text(thread.serviceGoal)).append('\n');
         }
 
-        if (!safe(spec.creativeAssumptions).isEmpty()) {
-            out.append("\n## 创作假设\n");
-            for (String assumption:safe(spec.creativeAssumptions)) out.append("- ").append(text(assumption)).append('\n');
-        }
+        section(out,"明确结局",spec.endingContract);
         return out.toString().strip();
     }
 
     private void section(StringBuilder out,String title,String value) {
         out.append("## ").append(title).append('\n').append(text(value)).append("\n");
+    }
+    private void sectionIfPresent(StringBuilder out,String title,String value) {
+        if (value!=null&&!value.isBlank()) section(out,title,value);
     }
     private void line(StringBuilder out,String label,String value) {
         if (value!=null&&!value.isBlank()) out.append("- ").append(label).append("：").append(value.strip()).append('\n');

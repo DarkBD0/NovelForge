@@ -10,7 +10,9 @@ final class OutlineTestFixtures {
 
     static OutlineSpec validSpec(long targetWords,String storyCore) {
         OutlineSpec spec=new OutlineSpec();
+        spec.schemaVersion="2";
         spec.storyCore=storyCore;
+        spec.readerAttraction="主角每推进一次调查，都会付出新的现实代价并逼近最终真相";
         spec.genreTone="悬疑、克制、重情节";
         spec.protagonistGoal="查清真相并作出最终选择";
         spec.coreConflict="追查真相会不断增加失去重要之人的风险";
@@ -29,6 +31,7 @@ final class OutlineTestFixtures {
 
         OutlineSpec.CharacterArc protagonist=new OutlineSpec.CharacterArc();
         protagonist.id="char-protagonist"; protagonist.name="主角";
+        protagonist.roleTier="PROTAGONIST";
         protagonist.goal="找到失踪者"; protagonist.motivation="承担自己曾逃避的责任";
         protagonist.flaw="容易凭直觉过早下结论"; protagonist.storyFunction="推动调查主线";
         protagonist.keyChoice="在安全与真相之间选择继续追查";

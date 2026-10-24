@@ -30,16 +30,26 @@ public class ReviewAggregator {
     private final RollingPlanStatePolicy rollingPlanState;
     private final ReviewConvergence convergence;
     private final ReviewPolicy reviewPolicy;
+    private final GenrePlanPolicy genrePlanPolicy;
+    private final GenreOutlinePolicy genreOutlinePolicy;
+    private final PlanBeatRepetitionPolicy planBeatRepetitionPolicy;
+    private final ExplicitRevealBoundaryPolicy explicitRevealBoundaryPolicy;
 
     public ReviewAggregator(WordCounter words, ExplicitWordLimit explicitWordLimit,
                             OutlineBudgetAudit outlineBudget, FactAtomicityPolicy factAtomicity,
                             ProseBoundaryPolicy proseBoundary,
                             RollingPlanStatePolicy rollingPlanState,
                             ReviewConvergence convergence,
-                            ReviewPolicy reviewPolicy) {
+                            ReviewPolicy reviewPolicy,
+                            GenrePlanPolicy genrePlanPolicy, GenreOutlinePolicy genreOutlinePolicy,
+                            PlanBeatRepetitionPolicy planBeatRepetitionPolicy,
+                            ExplicitRevealBoundaryPolicy explicitRevealBoundaryPolicy) {
         this.words=words; this.explicitWordLimit=explicitWordLimit; this.outlineBudget=outlineBudget;
         this.factAtomicity=factAtomicity; this.proseBoundary=proseBoundary;
         this.rollingPlanState=rollingPlanState; this.convergence=convergence; this.reviewPolicy=reviewPolicy;
+        this.genrePlanPolicy=genrePlanPolicy; this.genreOutlinePolicy=genreOutlinePolicy;
+        this.planBeatRepetitionPolicy=planBeatRepetitionPolicy;
+        this.explicitRevealBoundaryPolicy=explicitRevealBoundaryPolicy;
     }
 
     public Review aggregate(Novel novel, Artifact target, Action action, String instructions,
@@ -60,7 +70,7 @@ public class ReviewAggregator {
             }
         }
         review=outlineBudget.apply(novel,target,action,candidate,review);
-        review=ignoreEmptyFactFindingForPlan(target,action,candidate,review);
+        review=ignoreEmptyFactFindingForDeferredState(target,action,candidate,review);
         // Chapter facts are internal state, not novel prose. They are normalized by
         // StateExtractionPolicy after the prose review succeeds, so a formatting
         // defect in generated state must never send otherwise unchanged prose back
@@ -68,6 +78,12 @@ public class ReviewAggregator {
         review=proseBoundary.apply(target,action,candidate,review);
         review=rollingPlanState.apply(novel,target,action,instructions,candidate,review);
         review=reviewPolicy.normalize(validate(review),candidate,previous);
+        review=explicitRevealBoundaryPolicy.apply(novel,target,action,candidate,review);
+        review=genrePlanPolicy.apply(novel,target,action,candidate,review);
+        review=genreOutlinePolicy.apply(novel,target,action,instructions,candidate,review);
+        review=planBeatRepetitionPolicy.apply(novel,target,action,candidate,review);
+        review=ChapterDialogueRepetitionPolicy.apply(novel,target,action,candidate,review);
+        review=ChapterQuoteBalancePolicy.apply(target,action,candidate,review);
         review=convergence.apply(target,validate(review),guidedFixRound);
         return deduplicate(validate(review));
     }
@@ -99,14 +115,16 @@ public class ReviewAggregator {
         return action==Action.CHAPTER || (target!=null && target.kind==Kind.CHAPTER);
     }
 
-    /** Plans describe future work. Their contract requires facts=[], so a model must not block them for that. */
-    private Review ignoreEmptyFactFindingForPlan(Artifact target,Action action,
+    /** Plans do not record facts; chapter facts are extracted only after prose review. */
+    private Review ignoreEmptyFactFindingForDeferredState(Artifact target,Action action,
                                                   ModelGateway.Generated candidate,Review review) {
-        boolean plan=action==Action.PLAN || (target!=null && target.kind==Kind.PLAN);
-        if (!plan || candidate==null || candidate.facts()==null || !candidate.facts().isEmpty()) return review;
+        boolean deferred=action==Action.PLAN || action==Action.CHAPTER
+                || (target!=null && (target.kind==Kind.PLAN || target.kind==Kind.CHAPTER));
+        if (!deferred || candidate==null || candidate.facts()==null || !candidate.facts().isEmpty()) return review;
         List<ReviewIssue> kept=review.issueDetails().stream().filter(issue->{
             String text=issue.location()+issue.problem()+issue.evidence()+issue.suggestion();
-            return !(text.contains("档案增量") && (text.contains("缺失") || text.contains("补充") || text.contains("为空")));
+            return !(text.contains("档案增量") && (text.contains("缺失") || text.contains("补充")
+                    || text.contains("为空") || text.contains("没有记录")));
         }).toList();
         if (kept.size()==review.issueDetails().size()) return review;
         boolean passed=kept.stream().noneMatch(issue->"必须修正".equals(issue.severity()));

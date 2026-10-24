@@ -46,13 +46,18 @@ public interface ModelGateway {
     }
     record DialogueResponse(String reply, List<DialogueDecision> decisionCandidates,
                             List<ProjectUpdateCandidate> projectUpdateCandidates,
-                            DialogueProposal actionProposal) {
+                            DialogueProposal actionProposal,String intent) {
         public DialogueResponse {
             decisionCandidates=decisionCandidates==null?List.of():List.copyOf(decisionCandidates);
             projectUpdateCandidates=projectUpdateCandidates==null?List.of():List.copyOf(projectUpdateCandidates);
+            intent=intent==null||intent.isBlank()?(actionProposal==null?"DISCUSS":"EXECUTE"):intent;
+        }
+        public DialogueResponse(String reply,List<DialogueDecision> decisionCandidates,
+                                List<ProjectUpdateCandidate> projectUpdateCandidates,DialogueProposal actionProposal) {
+            this(reply,decisionCandidates,projectUpdateCandidates,actionProposal,null);
         }
         public DialogueResponse(String reply,List<DialogueDecision> decisionCandidates,DialogueProposal actionProposal) {
-            this(reply,decisionCandidates,List.of(),actionProposal);
+            this(reply,decisionCandidates,List.of(),actionProposal,null);
         }
     }
     record Generated(String title, String content, String summary, List<Fact> facts, Plan plan,

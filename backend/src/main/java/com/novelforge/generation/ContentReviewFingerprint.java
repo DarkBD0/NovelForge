@@ -12,10 +12,14 @@ import java.util.HexFormat;
 /** Stable identity for content review, deliberately excluding internal extracted state. */
 @Component
 public class ContentReviewFingerprint {
+    private final RequirementAuthority requirementAuthority;
+    public ContentReviewFingerprint(RequirementAuthority requirementAuthority) {
+        this.requirementAuthority=requirementAuthority;
+    }
     public String of(Novel novel,Artifact target,ModelGateway.Generated candidate,String instructions) {
         StringBuilder value=new StringBuilder(ReviewPolicy.VERSION).append('\n')
                 .append(text(novel.title)).append('\n').append(text(novel.synopsis)).append('\n')
-                .append(text(novel.requirements)).append('\n').append(novel.targetWords).append('\n')
+                .append(text(requirementAuthority.resolve(novel).text())).append('\n').append(novel.targetWords).append('\n')
                 .append(novel.approvedMaxWords).append('\n').append(target==null?"":target.kind).append('\n')
                 .append(target==null?0:target.chapterNumber).append('\n').append(text(instructions)).append('\n')
                 .append(text(candidate.title())).append('\n').append(text(candidate.content())).append('\n')

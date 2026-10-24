@@ -4,8 +4,8 @@
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>NovelForge · 长篇创作工作台</title>
   <meta name="description" content="本机运行的长篇小说创作工作台。逐章确认，滚动规划，让故事有始有终。">
-  <link rel="icon" href="data:,"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/word-settings.css"><link rel="stylesheet" href="/shadow-experiments.css"><link rel="stylesheet" href="/outline-editor.css"><link rel="stylesheet" href="/conversation.css">
-  <script type="module" src="/app.js"></script>
+  <link rel="icon" href="data:,"><link rel="stylesheet" href="/styles.css?v=20261017-history-rewrite"><link rel="stylesheet" href="/word-settings.css"><link rel="stylesheet" href="/shadow-experiments.css"><link rel="stylesheet" href="/outline-editor.css"><link rel="stylesheet" href="/conversation.css?v=20261014-chat-ux4"><link rel="stylesheet" href="/chapter-rewrite.css?v=20261017-history-rewrite">
+  <script type="module" src="/app.js?v=20261017-history-rewrite"></script>
 </head>
 <body>
   <header class="topbar"><a class="brand" href="/"><span class="monogram">NF</span><span>NovelForge<small>长篇创作工作台</small></span></a><div class="top-status"><span class="local">● 仅本机</span><span id="modelMode">正在连接…</span><button id="helpButton" class="quiet">模型配置</button></div></header>
@@ -19,6 +19,7 @@
 NOVELFORGE_MODEL_BASE_URL=你的兼容接口基础地址（通常以 /v1 结尾）
 NOVELFORGE_MODEL_NAME=模型名称
             NOVELFORGE_MODEL_API_KEY=replace-with-your-private-key（本机免密模型可不填）</pre><p>接口需支持 Chat Completions 与 JSON 指令输出。远程调用会将该任务的小说上下文发送到你配置的服务；请自行确认服务与费用。</p><p class="hint">不支持联网的演示模式与真实模型模式不会自动互相回退。完整说明见项目 README。</p></dialog>
+  <dialog id="chapterRewriteDialog"><form id="chapterRewriteForm"><div class="dialog-heading"><h2 id="chapterRewriteTitle">从本章重新创作</h2><button type="button" id="closeChapterRewrite" class="quiet">关闭</button></div><div id="chapterRewriteImpact" class="rewrite-impact"></div><label>重新创作要求<textarea name="instructions" rows="5" required maxlength="20000" placeholder="例如：改成爽文节奏，第1章确认异常后立即行动，第3章前拿到第一份 offer"></textarea></label><label class="check-label"><input type="checkbox" name="acknowledge" required>我知道规划和本章起的已确认正文会进入修订队列；旧版本仍然保留，可以查看或恢复。</label><input type="hidden" name="chapterNumber"><button class="primary" type="submit">建立重写链并修订规划</button></form></dialog>
   <div id="toast" role="status" hidden></div>
 </body>
 </html>

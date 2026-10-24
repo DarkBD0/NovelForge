@@ -13,6 +13,26 @@ class StateExtractionPolicyTest {
     private final ModelGateway.Generated candidate=new ModelGateway.Generated("第一章",
             "陈默把钥匙交给林秋。林秋收好钥匙，答应第二天带到警局。","交接钥匙",List.of(),null);
 
+    @Test void rejectsCrossChapterReuseOfRelationIdWithDifferentEndpointBeforeConfirmation() {
+        var novel=new com.novelforge.novel.Novel();
+        var approved=new com.novelforge.novel.Novel.Artifact();
+        approved.kind=com.novelforge.novel.Novel.Kind.CHAPTER; approved.chapterNumber=2;
+        var prior=new com.novelforge.novel.Novel.Version();
+        prior.stateRelations=List.of(new com.novelforge.novel.Novel.StateRelation(
+                "relation_hanmei_works_for_hongyuan","character_hanmei","WORKS_FOR",
+                "organization_hongyuan_manufacturing","韩梅供职宏远制造","ACTIVE"));
+        approved.versions.add(prior); approved.approvedVersionId=prior.id; novel.artifacts.add(approved);
+        var current=new com.novelforge.novel.Novel.Artifact();
+        current.kind=com.novelforge.novel.Novel.Kind.CHAPTER; current.chapterNumber=3;
+        novel.artifacts.add(current);
+        var changed=new StateExtractionPolicy.ValidatedState(List.of(),List.of(),List.of(
+                new com.novelforge.novel.Novel.StateRelation("relation_hanmei_works_for_hongyuan",
+                        "character_hanmei","WORKS_FOR","organization_hongyuan","韩梅供职宏远","ACTIVE")),List.of());
+
+        assertThatThrownBy(()->policy.requireStableIdentities(novel,current,changed))
+                .isInstanceOf(Problem.class).hasMessageContaining("仅重试状态提取");
+    }
+
     @Test void acceptsOnlyEvidenceBackedAtomicState() {
         var extraction=new ModelGateway.StateExtraction(List.of(new ModelGateway.ExtractedState(
                 "event_key_handoff","EVENT","陈默已把钥匙交给林秋","ACTIVE",List.of("陈默把钥匙交给林秋"))));
@@ -88,6 +108,56 @@ class StateExtractionPolicyTest {
         });
     }
 
+    @Test void repairsOneExtraModifierButPersistsOnlyExactSourceEvidence() {
+        String content="王海洋说自己梦见一屋子人，他一个字不会写，急得满头汗。";
+        var chapter=new ModelGateway.Generated("第一章",content,"怪梦",List.of(),null);
+        var extraction=new ModelGateway.StateExtraction(List.of(new ModelGateway.ExtractedState(
+                "foreshadow_exam_dream","FORESHADOW","王海洋梦见考试却记不清细节","OPEN",
+                List.of("王海洋说自己梦见一屋子人，他一个字不会写，急得满头大汗。"))));
+
+        var validated=policy.validateAll(chapter,extraction);
+
+        assertThat(validated.evidence()).singleElement().satisfies(saved->
+                assertThat(saved.evidenceQuotes()).containsExactly(
+                        "王海洋说自己梦见一屋子人，他一个字不会写，急得满头汗。"));
+    }
+
+    @Test void repairsOneOmittedConnectorButPersistsOnlyExactSourceEvidence() {
+        String content="他换了一个软件，又一个。又打开三家公司的官网，一个跳回首页。";
+        var chapter=new ModelGateway.Generated("第一章",content,"检查官网",List.of(),null);
+        var extraction=new ModelGateway.StateExtraction(List.of(new ModelGateway.ExtractedState(
+                "world_missing_recruitment","WORLD","三家公司官网没有校招入口","ACTIVE",
+                List.of("他换了一个软件，又一个。打开三家公司的官网，一个跳回首页。"))));
+
+        var validated=policy.validateAll(chapter,extraction);
+
+        assertThat(validated.evidence()).singleElement().satisfies(saved->
+                assertThat(saved.evidenceQuotes()).containsExactly(
+                        "他换了一个软件，又一个。又打开三家公司的官网，一个跳回首页。"));
+    }
+
+    @Test void doesNotRepairOmittedNegation() {
+        String content="林渡没有告诉室友秋招的异常。";
+        var chapter=new ModelGateway.Generated("第一章",content,"隐瞒异常",List.of(),null);
+        var extraction=new ModelGateway.StateExtraction(List.of(new ModelGateway.ExtractedState(
+                "fact_hidden_recruitment","CHARACTER","林渡隐瞒秋招异常","ACTIVE",
+                List.of("林渡有告诉室友秋招的异常。"))));
+
+        assertThatThrownBy(()->policy.validateAll(chapter,extraction))
+                .isInstanceOf(Problem.class).hasMessageContaining("并非正文原文");
+    }
+
+    @Test void doesNotRepairAddedNegationOrChangedFactWords() {
+        String content="王海洋说自己记得这场考试。";
+        var chapter=new ModelGateway.Generated("第一章",content,"怪梦",List.of(),null);
+        var extraction=new ModelGateway.StateExtraction(List.of(new ModelGateway.ExtractedState(
+                "foreshadow_exam_dream","FORESHADOW","王海洋不记得考试","OPEN",
+                List.of("王海洋说自己不记得这场考试。"))));
+
+        assertThatThrownBy(()->policy.validateAll(chapter,extraction))
+                .isInstanceOf(Problem.class).hasMessageContaining("并非正文原文");
+    }
+
     @Test void validatesEvidenceBackedEntitiesAndDirectedRelations() {
         var chen=new ModelGateway.ExtractedEntity("character_chen_mo","CHARACTER","陈默",List.of(),
                 "把钥匙交给林秋的人",List.of("陈默把钥匙交给林秋"));
@@ -107,6 +177,21 @@ class StateExtractionPolicyTest {
         });
         assertThat(validated.evidence()).extracting("key")
                 .containsExactly("character_chen_mo","character_lin_qiu","relation_chen_mo_knows_lin_qiu");
+    }
+
+    @Test void namespacesFactKeyWhenProviderReusesTheEntityKey() {
+        var fact=new ModelGateway.ExtractedState("character_lin_qiu","CHARACTER","林秋收好钥匙","ACTIVE",
+                List.of("林秋收好钥匙"));
+        var entity=new ModelGateway.ExtractedEntity("character_lin_qiu","CHARACTER","林秋",List.of(),
+                "收好钥匙的人",List.of("林秋收好钥匙"));
+
+        var validated=policy.validateAll(candidate,
+                new ModelGateway.StateExtraction(List.of(fact),List.of(entity),List.of()));
+
+        assertThat(validated.facts()).extracting("key").containsExactly("fact_character_lin_qiu");
+        assertThat(validated.entities()).extracting("key").containsExactly("character_lin_qiu");
+        assertThat(validated.evidence()).extracting("key")
+                .containsExactly("fact_character_lin_qiu","character_lin_qiu");
     }
 
     @Test void supportsColleagueDelegationAndTemporaryCustodyWithoutInventingEmploymentOrOwnership() {

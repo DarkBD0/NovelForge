@@ -30,7 +30,11 @@ public class AgentOrchestrator {
     }
 
     public ModelGateway.Generated generate(ModelGateway.Request request) {
-        AgentRole role=generationRole(request.action());
+        return generate(request,generationRole(request.action()));
+    }
+
+    public ModelGateway.Generated generate(ModelGateway.Request request,AgentRole role) {
+        require(role!=null,"写作 Agent 角色不能为空");
         return gateway.generate(contexts.compile(request,role));
     }
 

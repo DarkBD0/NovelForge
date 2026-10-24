@@ -54,7 +54,8 @@ public class TaskService {
     private final ConcurrentMap<String, FutureTask<Void>> running = new ConcurrentHashMap<>();
     private record StagedCandidate(String artifactId, String versionId, long revision, boolean needsReview) {}
     private record StateExtractionOutcome(String runId,List<Fact> facts,List<StateEntity> entities,
-                                          List<StateRelation> relations,List<StateEvidence> evidence,String sourceHash) {}
+                                          List<StateRelation> relations,List<StateEvidence> evidence,String sourceHash,
+                                          String warning) {}
 
     public TaskService(NovelRepository repository, WorkflowRules rules, WorkflowService workflow, ContextAssembler contexts,
                        SourceSnapshotFactory snapshots,
@@ -93,8 +94,15 @@ public class TaskService {
         Novel novel=repository.get(id);
         Artifact artifact=rules.artifact(novel,artifactId);
         Version version=artifact.latest();
-        require(version!=null && (version.summary==null || version.summary.isBlank()), "当前版本不需要补充摘要");
-        String instructions="只补充当前内容摘要，不修改标题、正文、档案增量或章节规划。摘要必须准确概括现有内容，供后续连续创作使用。";
+        require(version!=null && !artifact.clean(),"当前版本没有待修正的摘要");
+        boolean missing=version.summary==null || version.summary.isBlank();
+        boolean reviewFoundSummaryIssue=!missing && rules.reviewCurrent(novel,version)
+                && version.review!=null && version.review.issueDetails().stream()
+                .anyMatch(issue->"必须修正".equals(issue.severity()) && issue.location().contains("摘要"));
+        require(missing || reviewFoundSummaryIssue,"当前版本不需要补充或修正摘要");
+        String instructions=missing
+                ?"只补充当前内容摘要，不修改标题、正文、档案增量或章节规划。摘要必须准确概括现有内容，供后续连续创作使用。"
+                :"只修正当前内容摘要中与正文不一致的表述，不修改标题、正文、档案增量或章节规划。删除正文没有发生的推断、决定和行动，不为保留旧摘要向正文补写解释。";
         return submit(id,Action.REWRITE,artifactId,instructions,key,revision,true);
     }
     public Task submitContentFix(String id,String artifactId,String key,long revision) {
@@ -104,6 +112,8 @@ public class TaskService {
         List<ReviewIssue> required=version.review.issueDetails().stream()
                 .filter(issue->"必须修正".equals(issue.severity())).toList();
         require(!required.isEmpty(),"当前检查没有必须修正的问题，不应启动内容自动修订");
+        if(required.stream().allMatch(issue->issue.location().contains("摘要")))
+            return submitSummary(id,artifactId,key,revision);
         int round=version.contentFixRound+1;
         require(round<=2,"内容自动修订已达到两轮上限；请查看现有版本并由作者决定下一步");
         StringBuilder instructions=new StringBuilder("只对当前内容执行第 ").append(round)
@@ -143,7 +153,8 @@ public class TaskService {
         Novel novel=repository.get(id); Artifact artifact=rules.artifact(novel,artifactId); Version version=artifact.latest();
         require(artifact.kind==Kind.CHAPTER && version!=null && !artifact.clean(),
                 "状态提取只适用于待确认的章节正文");
-        require(version.stateExtractionRequired && !stateExtractions.current(version),
+        require(version.stateExtractionRequired && (!stateExtractions.current(version)
+                        || version.stateExtractionError!=null && !version.stateExtractionError.isBlank()),
                 "当前章节不需要重新提取状态");
         require(rules.reviewCurrent(novel,version) && version.review.passed(),
                 "内容检查必须先通过，才能只重试状态提取");
@@ -173,7 +184,8 @@ public class TaskService {
                 Artifact chapter=rules.artifact(n,artifactId); Version version=chapter.latest();
                 require(action==Action.REVIEW && chapter.kind==Kind.CHAPTER && version!=null && !chapter.clean(),
                         "状态提取只适用于待确认的章节正文");
-                require(version.stateExtractionRequired && !stateExtractions.current(version),
+                require(version.stateExtractionRequired && (!stateExtractions.current(version)
+                                || version.stateExtractionError!=null && !version.stateExtractionError.isBlank()),
                         "当前章节不需要重新提取状态");
                 require(rules.reviewCurrent(n,version) && version.review.passed(),
                         "内容检查必须先通过，才能只重试状态提取");
@@ -287,9 +299,12 @@ public class TaskService {
                 if (outlineTarget)
                     outlinePipelines.startStep(id,activeOutlineWorkspaceId,OutlinePipelineService.ARCHITECT,generationRunId);
                 candidate = deferredStylePolish
-                        ? styleEditor.apply(target.latest()) : agents.generate(generationRequest);
+                        ? styleEditor.apply(target.latest()) : agents.generate(generationRequest,generationRole);
                 if (outlineTarget && !deferredStylePolish)
                     candidate=outlineStructures.normalizeGenerated(snapshot,candidate);
+                if (!task.summaryOnly && candidate!=null && candidate.plan()!=null
+                        && (task.action==Action.PLAN || target!=null && target.kind==Kind.PLAN))
+                    candidate=PlanNarrativeRenderer.normalize(candidate);
                 if (!task.summaryOnly && (task.action==Action.CHAPTER || target!=null && target.kind==Kind.CHAPTER))
                     candidate=withoutWriterFacts(candidate);
                 if (outlineTarget && OUTLINE_AUTO_REPAIR.equals(task.automationKind)) {
@@ -440,7 +455,9 @@ public class TaskService {
             Version stateVersion=stateArtifact==null?null:stateArtifact.latest();
             if (finalReview.passed() && stateArtifact!=null && stateArtifact.kind==Kind.CHAPTER
                     && task.action!=Action.STYLE_REVIEW && task.action!=Action.COMPLETE
-                    && !stateExtractions.current(stateVersion)) {
+                    && (!stateExtractions.current(stateVersion)
+                    || stateExtractionOnly && stateVersion.stateExtractionError!=null
+                    && !stateVersion.stateExtractionError.isBlank())) {
                 progress(id,taskId,"EXTRACTING_STATE");
                 ModelGateway.Generated stateCandidate=new ModelGateway.Generated(stateVersion.title,stateVersion.content,
                         stateVersion.summary,List.of(),stateVersion.plan,stateVersion.outlineSpec,List.of());
@@ -452,11 +469,14 @@ public class TaskService {
                 activeAgentRunId=stateRunId;
                 markStateExtractionRunning(id,stateArtifact.id,stateVersion.id,stateRunId);
                 try {
-                    ModelGateway.StateExtraction extracted=agents.extractState(stateRequest,stateCandidate);
-                    StateExtractionPolicy.ValidatedState validated=stateExtractions.validateAll(stateCandidate,extracted);
+                    StateEvidenceRetry.Result result=StateEvidenceRetry.extractWithDiagnostics(
+                            extractionRequest -> agents.extractState(extractionRequest,stateCandidate),
+                            stateRequest,stateCandidate,stateExtractions);
+                    StateExtractionPolicy.ValidatedState validated=result.state();
+                    stateExtractions.requireStableIdentities(snapshot,stateArtifact,validated);
                     stateOutcome=new StateExtractionOutcome(stateRunId,validated.facts(),validated.entities(),
                             validated.relations(),validated.evidence(),
-                            stateExtractions.contentHash(stateVersion.content));
+                            stateExtractions.contentHash(stateVersion.content),result.warning());
                 } catch(Exception failure) {
                     preserveReviewAndMarkStateExtractionFailed(id,taskId,stateArtifact.id,stateVersion.id,
                             finalReview,finalReviewRunId,stateRunId,contentReviewFingerprint,failure);
@@ -489,15 +509,9 @@ public class TaskService {
                     return null;
                 }
                 if (task.action == Action.COMPLETE) {
-                    var open = canon.at(n, Integer.MAX_VALUE).stream().filter(e -> e.fact().type().equals("FORESHADOW") && e.fact().state().equals("OPEN")).toList();
-                    Review checked = finalReview;
-                    if (!open.isEmpty()) {
-                        String clues=open.stream().map(e -> e.fact().detail()).toList().toString();
-                        checked = finalReview.withIssue(new ReviewIssue("全书完结检查 > 伏笔回收","仍有重要伏笔未回收",clues,
-                                "在正文中完成这些伏笔，或由作者确认其不再属于重要伏笔","必须修正"));
-                        checked = new Review(false,checked.issues(),finalReview.mainlineResolved(),finalReview.endingClear(),false,checked.issueDetails());
-                    }
-                    n.completionChecks.add(new Completion(Novel.uid(), n.revision, words.approvedWords(n), checked, Novel.now()));
+                    // OPEN is an extraction hint, not proof that the story left a clue hanging.
+                    // A later chapter can pay it off without reusing the original fact key.
+                    n.completionChecks.add(new Completion(Novel.uid(), n.revision, words.approvedWords(n), finalReview, Novel.now()));
                 } else if (task.action == Action.STYLE_REVIEW) {
                     Artifact a=rules.artifact(n,task.artifactId);
                     a.latest().styleReview=finalReview;
@@ -565,7 +579,7 @@ public class TaskService {
                 plotForeshadowShadows.run(id,taskId,source.id,artifactId,versionId,request,downstreamCandidate,
                         shadowUpstream);
             }
-            if (!stateExtractionOnly && !deferredStylePolish && finalReview.passed()
+            if (!deferredStylePolish && finalReview.passed()
                     && (task.action==Action.CHAPTER
                     || (target!=null && target.kind==Kind.CHAPTER && List.of(Action.REWRITE,Action.REVIEW).contains(task.action))))
                 queueAutomaticStyleCheck(id,artifactId,versionId);
@@ -641,6 +655,7 @@ public class TaskService {
                     || version.outlineSpec==null || version.outlineAutoRepairRound>=1) return;
             StringBuilder instructions=new StringBuilder("这是系统授权的唯一一轮大纲自动修订（1/1）。")
                     .append("只修正下面列出的必须修正问题；不得处理作者决定或建议优化项，不得自动确认版本。")
+                    .append("先核对原始书名、简介和当前有效用户要求：它们高于候选内容及检查建议；不得通过删除简介中的关键事实、缩小事件范围或改写作者要求来消除候选内部差异。")
                     .append("保留不受影响的故事核心、结局、人物、事件、伏笔、稳定编号和字数预算；")
                     .append("如果局部修正影响引用或证据链，只同步调整直接相关字段：\n");
             for (int i=0;i<required.size();i++) {
@@ -704,10 +719,15 @@ public class TaskService {
             if (task.action==Action.REWRITE) {
                 artifact=rules.artifact(n,task.artifactId);
                 boolean changed=impact.changed(artifact.latest(),result.title(),result.content(),result.summary(),result.facts(),result.plan());
-                if (artifact.kind==Kind.OUTLINE && result.outlineSpec()!=null)
-                    changed=changed || !Objects.equals(artifact.latest().outlineSpecHash,outlineStructures.hash(result.outlineSpec()));
-                require(changed,
-                        "模型没有产生实际修改；原版本保持不变，请补充更具体的修改要求");
+                if (artifact.kind==Kind.OUTLINE && !task.summaryOnly) {
+                    require(result.outlineSpec()!=null,"模型没有返回结构化大纲；原版本保持不变");
+                    String currentVisible=artifact.latest().outlineSpec==null?artifact.latest().content
+                            :outlineStructures.render(artifact.latest().outlineSpec);
+                    String revisedVisible=outlineStructures.render(result.outlineSpec());
+                    require(!Objects.equals(currentVisible,revisedVisible),
+                            "模型没有产生实际修改，大纲结构保持不变或仅有内部编号、隐藏记录变化；原版本保持不变，请补充更具体的修改要求");
+                } else require(changed,
+                            "模型没有产生实际修改；原版本保持不变，请补充更具体的修改要求");
             } else {
                 artifact=new Artifact(); artifact.kind=Kind.valueOf(task.action.name());
                 if (artifact.kind==Kind.CHAPTER) artifact.chapterNumber=context.chapterNumber();
@@ -729,11 +749,11 @@ public class TaskService {
             }
             version.source=STYLE_POLISH.equals(task.automationKind)?"SYSTEM":agents.mode().equals("demo")?"DEMO":"MODEL";
             version.basedOnRevision=n.revision; version.sourceVersionIds=context.sourceVersions();
+            if (task.action==Action.REWRITE && !OUTLINE_AUTO_REPAIR.equals(task.automationKind))
+                version.pendingImpactReason=task.instructions;
             version.previousNeedsRevision=artifact.needsRevision;
             prepareChapterState(artifact,baseVersion,version);
             validateStagedVersion(n,artifact,version);
-            if (task.action==Action.REWRITE && !OUTLINE_AUTO_REPAIR.equals(task.automationKind))
-                impact.invalidateFollowing(n,artifact,task.instructions);
             artifact.versions.add(version); artifact.needsRevision=false;
             if (task.action!=Action.REWRITE) n.artifacts.add(artifact);
             n.revision++;
@@ -774,6 +794,7 @@ public class TaskService {
             version.stateExtractionPolicyVersion=base.stateExtractionPolicyVersion;
             version.stateExtractionSourceHash=base.stateExtractionSourceHash;
             version.stateExtractionAgentRunId=base.stateExtractionAgentRunId;
+            version.stateExtractionError=base.stateExtractionError;
             version.stateEvidence=base.stateEvidence==null?new ArrayList<>():new ArrayList<>(base.stateEvidence);
             version.stateEntities=base.stateEntities==null?new ArrayList<>():new ArrayList<>(base.stateEntities);
             version.stateRelations=base.stateRelations==null?new ArrayList<>():new ArrayList<>(base.stateRelations);
@@ -842,7 +863,7 @@ public class TaskService {
         version.stateExtractionRequired=true; version.stateExtractionStatus=StateExtractionStatus.SUCCEEDED;
         version.stateExtractionPolicyVersion=StateExtractionPolicy.VERSION;
         version.stateExtractionSourceHash=outcome.sourceHash();
-        version.stateExtractionAgentRunId=outcome.runId(); version.stateExtractionError=null;
+        version.stateExtractionAgentRunId=outcome.runId(); version.stateExtractionError=outcome.warning();
     }
 
     private Version version(Artifact artifact,String versionId) {
@@ -941,8 +962,16 @@ public class TaskService {
         require(List.of(TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.STALE, TaskStatus.INTERRUPTED).contains(old.status), "只有失败、中断、取消或过期的任务可以重试");
         if (old.resultArtifactId!=null && old.resultVersionId!=null) {
             Artifact artifact=rules.artifact(novel,old.resultArtifactId);
-            if (artifact.latest()!=null && old.resultVersionId.equals(artifact.latest().id) && artifact.latest().review==null)
+            Version version=artifact.latest();
+            if (version!=null && old.resultVersionId.equals(version.id)) {
+                if (artifact.kind==Kind.CHAPTER && version.stateExtractionRequired
+                        && rules.reviewCurrent(novel,version) && version.review.passed()
+                        && (!stateExtractions.current(version) || version.stateExtractionError!=null
+                        && !version.stateExtractionError.isBlank()))
+                    return submitStateExtraction(id,artifact.id,requestKey,revision);
+                // Once a candidate is saved, a generic retry must never generate it again.
                 return submit(id,Action.REVIEW,artifact.id,old.instructions,requestKey,revision);
+            }
         }
         return submit(id,old.action,old.artifactId,old.instructions,requestKey,revision,
                 old.summaryOnly,old.automationKind,old.automationRound);

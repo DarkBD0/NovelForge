@@ -56,6 +56,21 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    void explicitOutlineRewriteRoleKeepsConversationBriefDuringGeneration() {
+        FakeGateway gateway=new FakeGateway();
+        AgentOrchestrator orchestrator=new AgentOrchestrator(gateway,new StyleReviewPolicy());
+        String json="{\"title\":\"纯爽文\",\"conversationBrief\":{\"acceptedDecisions\":[\"不公开信息\"]},"
+                +"\"revisionTarget\":{\"kind\":\"OUTLINE\",\"content\":\"旧大纲\"}}";
+        var request=new ModelGateway.Request(Action.REWRITE,null,null,
+                new ContextAssembler.Context(json,List.of(),1,1),"");
+
+        orchestrator.generate(request,AgentRole.STORY_ARCHITECT);
+
+        assertThat(gateway.lastRequest.context().json()).contains("STORY_ARCHITECT","conversationBrief","不公开信息")
+                .doesNotContain("CONTENT_REVISER");
+    }
+
+    @Test
     void routesStyleReviewOnlyToStyleGatewayAndKeepsItNonBlocking() {
         FakeGateway gateway = new FakeGateway();
         AgentOrchestrator orchestrator = new AgentOrchestrator(gateway, new StyleReviewPolicy());

@@ -18,7 +18,7 @@ public class ApiErrors {
     }
     @ExceptionHandler(HttpMessageNotReadableException.class) ResponseEntity<?> json() { return ResponseEntity.badRequest().body(Map.of("message","JSON 结构或字段类型不合法")); }
     @ExceptionHandler(Exception.class) ResponseEntity<?> unexpected(Exception e) {
-        log.error("Request failed: {}", e.getClass().getSimpleName());
+        log.error("Request failed: {}", e.getClass().getSimpleName(), e);
         return ResponseEntity.internalServerError().body(Map.of("message","内部错误，原有内容保留；请查看本机日志"));
     }
 }

@@ -112,12 +112,27 @@ public class WorkflowRules {
         require(p.finalBatch || (p.prepareNextAfterChapter >= p.startChapter && p.prepareNextAfterChapter < p.endChapter), "非最终批次必须在结束前触发下一批规划");
         require(p.handoff != null && !p.handoff.isBlank() && p.assumptions != null && p.triggerReason != null && !p.triggerReason.isBlank(), "规划必须说明衔接、假设和提前规划的剧情节点");
         require(p.chapters != null && p.chapters.size() == p.endChapter - p.startChapter + 1, "章节安排必须覆盖完整范围");
+        require(p.criticalTransitions!=null && p.criticalTransitions.size()<=24,
+                "关键状态变化最多24条；普通生活细节不需要记录");
+        for (CriticalTransition transition:p.criticalTransitions) {
+            require(transition!=null && transition.chapterNumber()>=p.startChapter
+                    && transition.chapterNumber()<=p.endChapter,
+                    "关键状态变化的章节编号必须在本批规划范围内");
+            require(transition.subject()!=null && !transition.subject().isBlank()
+                    && transition.before()!=null && !transition.before().isBlank()
+                    && transition.change()!=null && !transition.change().isBlank()
+                    && transition.after()!=null && !transition.after().isBlank()
+                    && transition.evidenceTime()!=null && !transition.evidenceTime().isBlank()
+                    && transition.inferenceBoundary()!=null && !transition.inferenceBoundary().isBlank()
+                    && List.of("正文发生","章外发生","延后揭露").contains(transition.visibility()),
+                    "关键状态变化必须说明主体、变化前后、呈现方式、证据时间和推断边界");
+        }
         for (int i = 0; i < p.chapters.size(); i++) {
             ChapterBeat beat = p.chapters.get(i);
             require(beat != null && beat.number() == p.startChapter + i && beat.title() != null && !beat.title().isBlank() && beat.purpose() != null && !beat.purpose().isBlank(), "章节安排必须连续且有标题、剧情目的");
             require(beat.targetWords()==null || (beat.targetWords()>=100 && beat.targetWords()<=10000), "章节建议字数必须为100至10000；它只用于写作引导，不是确认门禁");
-            require(beat.sceneBeats()!=null && beat.sceneBeats().size()<=4
-                    && beat.sceneBeats().stream().noneMatch(item->item==null||item.isBlank()), "每章最多四个非空场景节点");
+            require(beat.sceneBeats()!=null && beat.sceneBeats().size()<=8
+                    && beat.sceneBeats().stream().noneMatch(item->item==null||item.isBlank()), "每章最多八个非空场景节点");
         }
         Artifact previous = n.artifacts.stream().filter(x -> x.kind == Kind.PLAN && x.batchNumber == a.batchNumber - 1).findFirst().orElse(null);
         int start = previous == null ? 1 : previous.approved().plan.endChapter + 1;

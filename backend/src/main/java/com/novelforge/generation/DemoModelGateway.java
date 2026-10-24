@@ -19,7 +19,9 @@ public class DemoModelGateway implements ModelGateway {
     public DialogueResponse dialogue(DialogueRequest request) {
         boolean execute=request.contextJson().contains("[演示立即生成]")
                 ||request.contextJson().contains("立即生成大纲")||request.contextJson().contains("开始生成大纲");
-        List<ProjectUpdateCandidate> projectUpdates=request.contextJson().contains("[演示修改资料]")
+        List<ProjectUpdateCandidate> projectUpdates=request.contextJson().contains("[演示模型误判资料]")
+                ?List.of(new ProjectUpdateCandidate("REQUIREMENTS","错误写入的补充要求","模拟模型误判"))
+                :request.contextJson().contains("[演示修改资料]")
                 ?List.of(
                         new ProjectUpdateCandidate("TITLE","雨夜失踪者","按作者在对话中的明确要求调整书名"),
                         new ProjectUpdateCandidate("SYNOPSIS","记者在连夜追查失踪案时，发现所有线索都指向自己遗忘的一晚。","完整替换作品简介"),
@@ -30,9 +32,10 @@ public class DemoModelGateway implements ModelGateway {
                 "可以先把你最在意的大纲方向固定下来。离线演示只验证对话、采纳和执行流程，不代表真实创作质量。",
                 List.of(new DialogueDecision("MUST_KEEP","大纲必须围绕书名、简介和作者已经明确的要求展开")),
                 projectUpdates,
-                execute&&projectUpdates.isEmpty()
+                execute
                         ?new DialogueProposal("GENERATE_OR_REVISE_OUTLINE","根据作者在本轮明确提出的要求生成或修订全书大纲")
-                        :null);
+                        :null,
+                execute||!projectUpdates.isEmpty()?"EXECUTE":"DISCUSS");
     }
     @Override public DialogueResponse dialogue(DialogueRequest request,DialogueStream stream) {
         stream.stage("GENERATING");
@@ -58,6 +61,18 @@ public class DemoModelGateway implements ModelGateway {
                 return new Generated(v.title,"作者可读大纲由系统根据 outlineSpec 生成",v.summary,
                         List.of(),null,spec,List.of());
             }
+            if (r.target().kind==Kind.PLAN && v.plan!=null) {
+                Plan revised=new Plan();
+                revised.startChapter=v.plan.startChapter;
+                revised.endChapter=v.plan.endChapter;
+                revised.prepareNextAfterChapter=v.plan.prepareNextAfterChapter;
+                revised.finalBatch=v.plan.finalBatch;
+                revised.triggerReason=v.plan.triggerReason;
+                revised.handoff=v.plan.handoff+"；承接已确认正文的最新调查结果";
+                revised.assumptions=v.plan.assumptions;
+                revised.chapters=new ArrayList<>(v.plan.chapters);
+                return new Generated(v.title,v.content,v.summary,v.facts,revised);
+            }
             return new Generated(v.title, v.content + "\n\n【离线演示修订示意】" + r.instructions(), v.summary, v.facts, v.plan);
         }
         return switch (kind) {
@@ -70,7 +85,9 @@ public class DemoModelGateway implements ModelGateway {
     }
     private OutlineSpec demoOutline(Request r) {
         OutlineSpec spec=new OutlineSpec();
+        spec.schemaVersion="3";
         spec.storyCore="林舟回到海港寻找失踪父亲，并查清灯塔停摆与秘密航线的关系";
+        spec.readerAttraction="每找到一段航行记录，林舟都会更接近父亲，也更接近一场即将发生的海难";
         spec.genreTone="近代海港悬疑，以调查行动和父子关系为主";
         spec.protagonistGoal="找到父亲并公开能够证明秘密航线的证据";
         spec.coreConflict="林舟必须在风暴封港前取得证据，同时避免证人与父亲再次暴露";
@@ -80,6 +97,7 @@ public class DemoModelGateway implements ModelGateway {
         rule.limit="没有许可不能进入封闭航道，风暴期间船只无法正常出港"; rule.cost="违规会失去调查资格并危及证人";
         rule.exceptionRule="无"; rule.constraintLevel="HARD"; rule.authorityStatus="CANDIDATE"; spec.worldRules.add(rule);
         OutlineSpec.CharacterArc person=new OutlineSpec.CharacterArc(); person.id="character_linz"; person.name="林舟";
+        person.roleTier="PROTAGONIST";
         person.goal="找到父亲并查明灯塔异常"; person.motivation="弥补多年误解并阻止更多船只失踪"; person.flaw="过度谨慎，害怕再次作出错误判断";
         person.storyFunction="调查主线的行动者"; person.keyChoice="在风暴中公开证据而不是独自追踪父亲";
         person.arcDirection="从只求私人答案转向承担公共责任"; person.finalState="与父亲和解并留下维护灯塔"; spec.characters.add(person);
@@ -88,6 +106,10 @@ public class DemoModelGateway implements ModelGateway {
         part.turn="林舟确认父亲并非逃亡者，而是保护证人"; part.estimatedWords=(int)r.novel().targetWords;
         OutlineSpec.StoryStage stage=new OutlineSpec.StoryStage(); stage.id="stage_main"; stage.title="调查、风暴与归航";
         stage.goal="从来信追查到维护间并公开证据"; stage.estimatedWords=(int)r.novel().targetWords;
+        stage.readerPayoff="林舟能否在风暴封港前找到父亲并救下返航船只";
+        stage.dramaticTurn="走私者封锁记录，林舟必须放弃独自寻父，冒暴露证人的风险公开航线证据";
+        stage.payoffResult="灯塔恢复，返航船只避开暗礁，林舟与父亲重逢";
+        stage.escalation="核心问题得到回答，父子关系与港口局势随之改变";
         OutlineSpec.KeyEvent event=new OutlineSpec.KeyEvent(); event.id="event_truth"; event.title="灯塔真相";
         event.event="林舟用铜钥匙进入维护间，取得航行记录并恢复灯塔"; event.consequence="返航船只避开暗礁，走私证据得以公开";
         event.characterChange="林舟选择承担港口安全责任"; event.irreversibleTurn="秘密航线失去隐蔽条件";

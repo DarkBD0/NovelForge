@@ -35,7 +35,7 @@ class ReviewConvergenceTest {
         assertThat(current.passed()).isFalse();
     }
 
-    @Test void secondGuidedRoundTurnsOnlyTheRepeatedFindingIntoAuthorDecision() {
+    @Test void secondGuidedRoundStopsAutomaticRepairWithoutClearingTheBlockingFinding() {
         Artifact artifact=new Artifact(); artifact.kind=Kind.CHAPTER;
         ReviewIssue repeated=new ReviewIssue("第十三章储存卡交接段落","储存卡再次移交，与上一章冲突",
                 "上一章已经交给警方","删除重复移交","必须修正");
@@ -44,10 +44,10 @@ class ReviewConvergenceTest {
         Review result=convergence.apply(artifact,review(new ReviewIssue("第十三章储存卡交接段落",
                 "储存卡再次移交，与上一章冲突","上一章已经交给警方","删除重复移交","必须修正")),2);
 
-        assertThat(result.passed()).isTrue();
+        assertThat(result.passed()).isFalse();
         assertThat(result.issueDetails()).singleElement().satisfies(issue->{
-            assertThat(issue.severity()).isEqualTo("作者决定");
-            assertThat(issue.suggestion()).contains("两轮自动修订","停止自动循环");
+            assertThat(issue.severity()).isEqualTo("必须修正");
+            assertThat(issue.suggestion()).contains("两轮定点修订","停止继续自动修订");
             assertThat(issue.issueId()).isEqualTo(old.review.issueDetails().getFirst().issueId());
         });
     }

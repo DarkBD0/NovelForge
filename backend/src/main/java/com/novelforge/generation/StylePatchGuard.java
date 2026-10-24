@@ -29,6 +29,10 @@ public final class StylePatchGuard {
             if (oldText==null || oldText.isBlank() || newText==null)
                 throw error("文风修改缺少可核对的原文或替换文字");
             if (oldText.length()>500) throw error("单处修改范围过大，已拒绝自动应用");
+            if (!balancedDialogueQuotes(oldText))
+                throw error("待删除片段只包含对话引号的一半，删除后会留下多余引号");
+            if (newText.isBlank() && leavesDanglingPunctuation(base.content,oldText))
+                throw error("删除会在段落末尾留下逗号或冒号");
             affected+=oldText.length();
             if (affected>2000) throw error("本轮修改总范围过大，已拒绝自动应用");
             if (!newText.isBlank())
@@ -39,10 +43,31 @@ public final class StylePatchGuard {
                 throw error("修改会改变数字、时间或英文专名，已转为作者建议");
         }
         ModelGateway.Generated result=RewritePatchApplier.apply(base,patch,kind);
+        // Removing an entire prose sentence must not leave empty phantom paragraphs.
+        String cleanedContent=result.content().replaceAll("(?:\\r?\\n[ \\t]*){3,}","\n\n");
+        result=new ModelGateway.Generated(result.title(),cleanedContent,result.summary(),
+                result.facts(),result.plan(),result.outlineSpec(),result.draftIssues());
         if (!base.title.equals(result.title()) || !base.summary.equals(result.summary())
                 || !base.facts.equals(result.facts()) || base.plan!=result.plan())
             throw error("文风修改越过正文边界，已拒绝自动应用");
         return result;
+    }
+
+    private static boolean balancedDialogueQuotes(String text) {
+        long opens=text.chars().filter(ch->ch=='“').count();
+        long closes=text.chars().filter(ch->ch=='”').count();
+        return opens==closes;
+    }
+
+    private static boolean leavesDanglingPunctuation(String content,String oldText) {
+        if(content==null) return false;
+        int index=content.indexOf(oldText);
+        if(index<=0 || content.indexOf(oldText,index+oldText.length())>=0) return false;
+        char before=content.charAt(index-1);
+        if("，、：；".indexOf(before)<0) return false;
+        int after=index+oldText.length();
+        while(after<content.length() && (content.charAt(after)==' ' || content.charAt(after)=='\t')) after++;
+        return after==content.length() || "。！？\r\n”’）】".indexOf(content.charAt(after))>=0;
     }
 
     private static List<String> tokens(String text) {

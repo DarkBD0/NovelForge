@@ -35,4 +35,28 @@ class ProseBoundaryPolicyTest {
 
         assertThat(policy.apply(plan,Action.PLAN,candidate,original)).isSameAs(original);
     }
+
+    @Test void blocksInternalChapterNumberLeakingIntoCharacterDialogue() {
+        var candidate=new ModelGateway.Generated("第十二章",
+                "赵磊看着他：\"第10章我把协议交给了陈默，你怎么又要一份？\"",
+                "摘要",List.of(),null);
+
+        Review result=policy.apply(null,Action.CHAPTER,candidate,
+                new Review(true,List.of(),false,false,false,List.of()));
+
+        assertThat(result.passed()).isFalse();
+        assertThat(result.issueDetails()).singleElement().satisfies(issue->{
+            assertThat(issue.location()).contains("故事内章节编号");
+            assertThat(issue.evidence()).contains("第10章我把协议交给了陈默");
+        });
+    }
+
+    @Test void ordinaryTimeAndChapterHeadingAreNotTreatedAsDialogueLeaks() {
+        var candidate=new ModelGateway.Generated("第十章",
+                "第十章 旧楼。十分钟前我把协议交给了陈默。",
+                "摘要",List.of(),null);
+        Review original=new Review(true,List.of(),false,false,false,List.of());
+
+        assertThat(policy.apply(null,Action.CHAPTER,candidate,original)).isSameAs(original);
+    }
 }

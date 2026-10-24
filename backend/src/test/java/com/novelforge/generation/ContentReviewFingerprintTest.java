@@ -8,7 +8,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class ContentReviewFingerprintTest {
-    private final ContentReviewFingerprint fingerprints=new ContentReviewFingerprint();
+    private final ContentReviewFingerprint fingerprints=new ContentReviewFingerprint(new RequirementAuthority());
 
     @Test void ignoresExtractedStateButChangesForVisibleTextOrAuthoritativeInputs() {
         Novel novel=new Novel(); novel.title="零点回声"; novel.synopsis="雨夜谜案"; novel.requirements="克制";

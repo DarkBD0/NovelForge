@@ -123,6 +123,8 @@ public class NovelController {
     public record ConversationExecute(@NotBlank @Size(max=100) String requestKey,@Min(0) long revision) {}
     public record ProjectUpdatesApply(@Min(0) long revision) {}
     public record CandidateDismiss(@Min(0) long revision) {}
+    public record BeginChapterRewrite(@Min(1) int chapterNumber,@NotBlank @Size(max=20000) String instructions,
+                                      @Min(0) long revision) {}
     public record ShadowSearch(@NotBlank @Size(max=2000) String query,@Min(1) Integer beforeChapter,
                                @Min(1) @Max(20) Integer limit) {}
     public record StructuredMemoryContinuityAb(@NotBlank @Size(max=100) String requestKey,
@@ -273,6 +275,10 @@ public class NovelController {
                                       @Valid @RequestBody ProjectUpdatesApply r) {
         return conversations.applyProjectUpdates(id,sessionId,r.revision());
     }
+    @PostMapping("/novels/{id}/conversations/{sessionId}/project-updates/reject")
+    public Object rejectProjectUpdates(@PathVariable String id,@PathVariable String sessionId) {
+        return conversations.rejectProjectUpdates(id,sessionId);
+    }
     @PostMapping("/novels/{id}/conversations/{sessionId}/proposals/{proposalId}/execute")
     @ResponseStatus(HttpStatus.ACCEPTED)
     public Object executeConversationProposal(@PathVariable String id,@PathVariable String sessionId,
@@ -281,6 +287,10 @@ public class NovelController {
     }
     @PostMapping("/novels/{id}/generation-tasks") @ResponseStatus(HttpStatus.ACCEPTED)
     public Object generate(@PathVariable String id, @Valid @RequestBody Generate r) { return tasks.submit(id, r.action(), r.artifactId(), r.instructions(), r.requestKey(), r.revision()); }
+    @PostMapping("/novels/{id}/chapter-rewrites")
+    public Object beginChapterRewrite(@PathVariable String id,@Valid @RequestBody BeginChapterRewrite r) {
+        return view(workflow.beginChapterRewrite(id,r.chapterNumber(),r.instructions(),r.revision()));
+    }
     @PostMapping("/novels/{id}/artifacts/{artifactId}/summary-tasks") @ResponseStatus(HttpStatus.ACCEPTED)
     public Object summary(@PathVariable String id,@PathVariable String artifactId,@Valid @RequestBody Retry r) {
         return tasks.submitSummary(id,artifactId,r.requestKey(),r.revision());

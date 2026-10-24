@@ -29,6 +29,13 @@ public class OutlineImpactAnalyzer {
         if (different(before.storyCore,after.storyCore)) {
             changed.add("故事核心"); continuity=true; plot=true;
         }
+        if (different(before.readerAttraction,after.readerAttraction)) {
+            changed.add("核心吸引点"); plot=true;
+        }
+        if (different(before.openingPayoff,after.openingPayoff)
+                || different(before.openingPayoffEventId,after.openingPayoffEventId)) {
+            changed.add("开篇首次兑现"); plot=true;
+        }
         if (different(before.genreTone,after.genreTone)) changed.add("题材与基调");
         if (different(before.protagonistGoal,after.protagonistGoal)) {
             changed.add("主角目标"); continuity=true; plot=true;

@@ -88,6 +88,11 @@ class LocalAccessTest {
                 containsString("renderShadowExperiments"), containsString("data-shadow-feedback"),
                 containsString("shadowReviewSummary"), containsString("averageModelDurationMillis"),
                 containsString("shadowPollUntil"), containsString("professionalRunning"),
+                containsString("updateChatStreamDom"), containsString("data-chat-latest"),
+                containsString("conversation-context"), containsString("data-project-review"),
+                containsString("mobileInspectorOpen"), containsString("desktopInspectorCollapsed"),
+                containsString("conversationDisplayTitle"), containsString("conversation-scope-notice"),
+                containsString("chatUnread"),
                 not(containsString("JSON.stringify(v.facts")))));
         mvc.perform(get("/review-text.js")).andExpect(status().isOk()).andExpect(content().string(allOf(
                 containsString("One replacement pass"), containsString("compactLegacyIssue"))));

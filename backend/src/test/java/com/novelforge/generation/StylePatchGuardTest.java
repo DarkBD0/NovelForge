@@ -41,4 +41,37 @@ class StylePatchGuardTest {
         assertThatThrownBy(()->StylePatchGuard.apply(base(),number,Kind.CHAPTER)).hasMessageContaining("只允许删除明确赘句");
         assertThatThrownBy(()->StylePatchGuard.apply(base(),equalLengthRewrite,Kind.CHAPTER)).hasMessageContaining("只允许删除明确赘句");
     }
+
+    @Test void rejectsDeletingOnlyHalfOfDialogueQuotation() {
+        Version dialogue=base();
+        dialogue.content="“我说我不知道。”他说，“我确实不知道。”";
+        dialogue.summary="双方没有决定先后顺序。";
+        dialogue.facts=List.of();
+        RewritePatch patch=new RewritePatch(List.of(new RewritePatch.Operation(
+                "REPLACE_TEXT","content",null,"他说，“我确实不知道。","",null,null,null,null)));
+        assertThatThrownBy(()->StylePatchGuard.apply(dialogue,patch,Kind.CHAPTER))
+                .hasMessageContaining("只包含对话引号的一半");
+    }
+
+    @Test void rejectsDeletionThatLeavesACommaAtParagraphEnd() {
+        Version chapter=base();
+        chapter.content="陈迟把名片放进口袋，没有扔，也没有收得多郑重。\n\n罗建走开。";
+        chapter.summary="陈迟收到名片，罗建离开。";
+        chapter.facts=List.of();
+        RewritePatch patch=new RewritePatch(List.of(new RewritePatch.Operation(
+                "REPLACE_TEXT","content",null,"没有扔，也没有收得多郑重。","",null,null,null,null)));
+        assertThatThrownBy(()->StylePatchGuard.apply(chapter,patch,Kind.CHAPTER))
+                .hasMessageContaining("段落末尾留下逗号");
+    }
+
+    @Test void deletionDoesNotLeaveEmptyParagraphs() {
+        Version chapter=base();
+        chapter.content="他听见脚步。\n\n这是没有必要的解释。\n\n他抬头。";
+        chapter.summary="他听见脚步并抬头。";
+        chapter.facts=List.of();
+        RewritePatch patch=new RewritePatch(List.of(new RewritePatch.Operation(
+                "REPLACE_TEXT","content",null,"这是没有必要的解释。","",null,null,null,null)));
+        assertThat(StylePatchGuard.apply(chapter,patch,Kind.CHAPTER).content())
+                .isEqualTo("他听见脚步。\n\n他抬头。");
+    }
 }

@@ -20,7 +20,7 @@ import java.util.Set;
 /** Deterministic normalization, rendering, hashing and reference validation for outlines. */
 @Component
 public class OutlineStructureService {
-    public static final String VERSION="2026-09-29-outline-spec-v1";
+    public static final String VERSION="2026-10-15-outline-visible-contract-v5";
     private final OutlineRenderer renderer;
     private final ObjectMapper canonicalMapper;
 
@@ -50,7 +50,11 @@ public class OutlineStructureService {
         required(issues,"故事核心",spec.storyCore); required(issues,"题材与叙事基调",spec.genreTone);
         required(issues,"主角目标",spec.protagonistGoal); required(issues,"核心冲突",spec.coreConflict);
         required(issues,"明确结局",spec.endingContract);
-        nonEmpty(issues,"世界规则",spec.worldRules); nonEmpty(issues,"核心人物骨架",spec.characters);
+        if ("2".equals(spec.schemaVersion) || "3".equals(spec.schemaVersion))
+            required(issues,"核心吸引点",spec.readerAttraction);
+        // Realistic stories may have no special world rule. Requiring one turns
+        // ordinary procedures into artificial story machinery.
+        nonEmpty(issues,"核心人物骨架",spec.characters);
         nonEmpty(issues,"全书结构",spec.parts);
 
         Set<String> ids=new HashSet<>(); Set<String> stageIds=new HashSet<>(); Set<String> requirementIds=new HashSet<>();
@@ -69,9 +73,15 @@ public class OutlineStructureService {
                     "未确认大纲中的规则不能标记为已确认","当前权威状态："+value(rule.authorityStatus),"生成阶段统一标记为 CANDIDATE");
         }
         for (OutlineSpec.CharacterArc person:safe(spec.characters)) {
-            id(issues,ids,"核心人物骨架",person.id); required(issues,"核心人物姓名",person.name);
-            required(issues,"人物目标",person.goal); required(issues,"人物动机",person.motivation);
-            required(issues,"人物剧情功能",person.storyFunction); required(issues,"人物最终状态",person.finalState);
+            id(issues,ids,"核心人物",person.id); required(issues,"人物姓名",person.name);
+            required(issues,"人物剧情功能",person.storyFunction);
+            if (notBlank(person.roleTier) && !List.of("PROTAGONIST","CORE_SUPPORT","FUNCTIONAL_NPC").contains(person.roleTier))
+                issue(issues,"核心人物 > "+value(person.name),"人物层级无效","当前层级："+person.roleTier,
+                        "使用 PROTAGONIST、CORE_SUPPORT 或 FUNCTIONAL_NPC");
+            if (!"FUNCTIONAL_NPC".equals(person.roleTier)) {
+                required(issues,"人物目标",person.goal); required(issues,"人物动机",person.motivation);
+                required(issues,"人物最终状态",person.finalState);
+            }
         }
 
         long partWords=0;
@@ -86,6 +96,14 @@ public class OutlineStructureService {
             for (OutlineSpec.StoryStage stage:safe(part.stages)) {
                 id(issues,ids,"故事阶段",stage.id); if (notBlank(stage.id)) stageIds.add(stage.id);
                 required(issues,"故事阶段标题",stage.title); required(issues,"故事阶段目标",stage.goal);
+                // Legacy outlines keep their original review contract. New outlines carry
+                // the dramatic and reader-facing bridge into rolling chapter plans.
+                if ("3".equals(spec.schemaVersion)) {
+                    required(issues,"故事阶段 > "+value(stage.title)+" > 读者期待",stage.readerPayoff);
+                    required(issues,"故事阶段 > "+value(stage.title)+" > 阻力与抉择",stage.dramaticTurn);
+                    required(issues,"故事阶段 > "+value(stage.title)+" > 阶段兑现",stage.payoffResult);
+                    required(issues,"故事阶段 > "+value(stage.title)+" > 后续变化",stage.escalation);
+                }
                 if (stage.estimatedWords<=0) issue(issues,"故事阶段 > "+value(stage.title),"阶段预计字数必须大于零",
                         "当前值："+stage.estimatedWords,"填写可汇总的正整数字数");
                 stageWords+=Math.max(0,stage.estimatedWords);
@@ -128,6 +146,10 @@ public class OutlineStructureService {
                         "引用编号："+value(prerequisite),"改为当前 OutlineSpec 中存在的阶段或事件编号");
 
         String rendered=renderer.render(spec);
+        for (String internalTerm:List.of("作者明确要求","硬性约束","方向性约束","开放创作空间","创作假设",
+                "全书不分卷","只保留一条主线","紧凑阶段","合并后半段","至此不再重复","不展开独立调查线"))
+            if (rendered.contains(internalTerm)) issue(issues,"作者可读大纲",
+                    "内部工作术语混入大纲正文","发现“"+internalTerm+"”","把它保留在创作依据中，不要写入正式大纲");
         if (!rendered.equals(candidate.content())) issue(issues,"作者可读大纲",
                 "展示文本不是由当前结构化大纲生成","当前展示文本与确定性投影不一致",
                 "重新从当前 OutlineSpec 生成作者可读大纲");

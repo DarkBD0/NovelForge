@@ -184,7 +184,9 @@ class TaskRecoveryTest {
                 new ModelGateway.ExtractedState("event_copper_button","EVENT","周宁捡到一枚铜扣","ACTIVE",
                         List.of("周宁在码头捡到一枚铜扣。")))))
                 .when(model).extractState(any(),any());
-        Task retry=tasks.submitStateExtraction(n.id,chapter.id,Novel.uid(),failed.revision);
+        Task retry=tasks.retry(n.id,review.id,Novel.uid(),failed.revision);
+        assertThat(retry.action).isEqualTo(Action.REVIEW);
+        assertThat(retry.automationKind).isEqualTo(TaskService.STATE_EXTRACTION_ONLY);
         await().atMost(Duration.ofSeconds(10)).until(()->tasks.find(repository.get(n.id),retry.id).status==TaskStatus.SUCCEEDED);
 
         Version completed=repository.get(n.id).artifacts.getLast().latest();
@@ -194,6 +196,39 @@ class TaskRecoveryTest {
         verify(model,times(1)).review(any(),any());
         verify(model,times(2)).extractState(any(),any());
         verify(model,never()).generate(any());
+    }
+    @Test void failedChapterGenerationWithSavedReviewedDraftRetriesOnlyStateExtraction() {
+        Novel n=create();
+        Novel seeded=repository.update(n.id,stored->{
+            Artifact chapter=new Artifact(); chapter.kind=Kind.CHAPTER; chapter.chapterNumber=1;
+            Version version=new Version(); version.title="第一章";
+            version.content="周宁在码头捡到一枚铜扣。"; version.summary="周宁捡到铜扣。";
+            version.review=new Review(true,List.of(),false,false,false);
+            version.reviewRevision=stored.revision; version.reviewPolicyVersion=ReviewPolicy.VERSION;
+            version.stateExtractionRequired=true; version.stateExtractionStatus=StateExtractionStatus.FAILED;
+            version.stateExtractionError="模型返回了截断的状态数据";
+            chapter.versions.add(version); stored.artifacts.add(chapter);
+            Task failed=new Task(); failed.action=Action.CHAPTER; failed.status=TaskStatus.FAILED;
+            failed.resultArtifactId=chapter.id; failed.resultVersionId=version.id;
+            stored.tasks.add(failed);
+            return stored;
+        });
+        Task failed=seeded.tasks.getLast();
+        doReturn(new ModelGateway.StateExtraction(List.of(
+                new ModelGateway.ExtractedState("event_copper_button","EVENT","周宁捡到一枚铜扣","ACTIVE",
+                        List.of("周宁在码头捡到一枚铜扣。")))))
+                .when(model).extractState(any(),any());
+
+        Task retry=tasks.retry(n.id,failed.id,Novel.uid(),seeded.revision);
+        assertThat(retry.action).isEqualTo(Action.REVIEW);
+        assertThat(retry.automationKind).isEqualTo(TaskService.STATE_EXTRACTION_ONLY);
+        await().atMost(Duration.ofSeconds(10)).until(()->tasks.find(repository.get(n.id),retry.id).status==TaskStatus.SUCCEEDED);
+        Version recovered=repository.get(n.id).artifacts.getLast().latest();
+        assertThat(recovered.content).isEqualTo("周宁在码头捡到一枚铜扣。");
+        assertThat(recovered.review.passed()).isTrue();
+        assertThat(recovered.stateExtractionStatus).isEqualTo(StateExtractionStatus.SUCCEEDED);
+        verify(model,never()).generate(any());
+        verify(model,never()).review(any(),any());
     }
     @Test void failedReviewKeepsDraftAndRetryOnlyReviewsIt() {
         when(model.generate(any())).thenReturn(generated());
@@ -276,6 +311,11 @@ class TaskRecoveryTest {
         assertThat(repairedWorkspace.combinedReview.passed()).isTrue();
         assertThat(saved.agentRuns.stream().filter(run->automatic.id.equals(run.taskId))).hasSize(2);
         verify(model,times(2)).generate(any());
+        var generationRequests=org.mockito.ArgumentCaptor.forClass(ModelGateway.Request.class);
+        verify(model,times(2)).generate(generationRequests.capture());
+        assertThat(generationRequests.getAllValues().get(1).instructions())
+                .contains("原始书名、简介和当前有效用户要求")
+                .contains("不得通过删除简介中的关键事实");
         verify(model,times(2)).outlineContinuityReview(any(),any());
         verify(model,times(1)).outlinePlotReview(any(),any());
     }

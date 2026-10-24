@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.novelforge.generation.*;
 import com.novelforge.novel.Novel;
 import com.novelforge.novel.Novel.*;
+import com.novelforge.shared.Problem;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.*;
 import java.net.InetSocketAddress;
@@ -85,6 +86,26 @@ class HttpModelGatewayTest {
         return new ModelGateway.Request(Action.PLAN,n,null,
                 new ContextAssembler.Context("{\"title\":\"规划验证\",\"nextChapter\":1,\"nextBatch\":1}",List.of(),1,1),"");
     }
+    @Test void planReviewRunsFocusedCausalAuditAndKeepsEvidenceGrounded() throws Exception {
+        Plan plan=new Plan();plan.startChapter=1;plan.endChapter=2;
+        plan.chapters=List.of(new ChapterBeat(1,"火灾","陈小满在火灾中死亡"),
+                new ChapterBeat(2,"合照","火后拍下的合照中出现陈小满"));
+        ModelGateway.Generated candidate=new ModelGateway.Generated("章节规划",
+                PlanNarrativeRenderer.render(plan),"摘要",List.of(),plan);
+        queueReply(new Review(true,List.of(),false,false,false,List.of()));
+        queueReply(new PlanCausalityAudit(List.of(new PlanCausalityAudit.Finding("第二章",
+                "照片与死亡时间冲突","火后拍下的合照中出现陈小满","陈小满在火灾中死亡",
+                "修改照片拍摄时间或人物身份","必须修正"))));
+
+        Review result=gateway().review(planRequest(),candidate);
+
+        assertThat(calls.get()).isEqualTo(2);
+        assertThat(result.passed()).isFalse();
+        assertThat(result.issueDetails()).hasSize(1);
+        JsonNode body=mapper.readTree(received.get());
+        assertThat(body.path("messages").path(0).path("content").asText()).contains("章节规划的因果核对员");
+        assertThat(body.path("messages").path(1).path("content").asText()).contains("火后拍下的合照中出现陈小满");
+    }
     ModelGateway.Request chapterRewriteRequest() {
         Novel n=new Novel();n.title="章节重写验证";
         Artifact target=new Artifact();target.kind=Kind.CHAPTER;target.chapterNumber=3;
@@ -136,6 +157,10 @@ class HttpModelGatewayTest {
         assertThat(mapper.readTree(received.get()).path("messages").size()).isEqualTo(2);
         assertThat(mapper.readTree(received.get()).has("response_format")).isFalse();
         assertThat(mapper.readTree(received.get()).path("messages").path(0).path("content").asText())
+                .contains("你是小说大纲主笔", "outlineSpec 使用 schemaVersion");
+        reply(new ModelGateway.Generated("第一章","内容","摘要",List.of(),null),"stop");
+        gateway.generate(chapterRequest());
+        assertThat(mapper.readTree(received.get()).path("messages").path(0).path("content").asText())
                 .contains("不得把正文剧情顺序重复写进人物档案", "同一事实只能有一个权威条目",
                         "CHAPTER 的 facts 必须返回 []", "独立状态提取 Agent");
         reply(new Review(true,List.of(),true,true,true),"stop");
@@ -171,6 +196,7 @@ class HttpModelGatewayTest {
         reply(responseValue,"stop");
         ModelGateway.DialogueResponse result=gateway().dialogue(new ModelGateway.DialogueRequest(
                 "{\"scope\":\"OUTLINE\",\"latestUserMessage\":\"主角需要更主动\"}"));
+        assertThat(result.intent()).isEqualTo("EXECUTE");
         assertThat(result.reply()).contains("主角");
         assertThat(result.decisionCandidates()).singleElement().satisfies(item->{
             assertThat(item.type()).isEqualTo("MUST_CHANGE");
@@ -182,7 +208,7 @@ class HttpModelGatewayTest {
         });
         JsonNode body=mapper.readTree(received.get());
         assertThat(body.path("messages").get(0).path("content").asText())
-                .contains("不能直接修改大纲","只有用户逐项采纳","projectUpdateCandidates","完整值");
+                .contains("DISCUSS|EXECUTE|UNCLEAR","发起候选版本任务","不需要逐条采纳","统一查看修改前后","projectUpdateCandidates","完整值");
         assertThat(body.path("messages").get(1).path("content").asText()).contains("latestUserMessage");
         assertThat(body.has("thinking")).isFalse();
 
@@ -194,6 +220,11 @@ class HttpModelGatewayTest {
                 "projectUpdateCandidates",List.of()),"stop");
         assertThatThrownBy(()->gateway().dialogue(new ModelGateway.DialogueRequest("{}")))
                 .hasMessageContaining("type 不受支持");
+
+        reply(Map.of("intent","MAYBE","reply","无法判断","decisionCandidates",List.of(),
+                "projectUpdateCandidates",List.of()),"stop");
+        assertThatThrownBy(()->gateway().dialogue(new ModelGateway.DialogueRequest("{}")))
+                .hasMessageContaining("intent 不受支持");
     }
     @Test void dialogueStreamsOnlyTheReadableReplyAndStillValidatesTheWholeJson() throws Exception {
         var responseValue=new ModelGateway.DialogueResponse("先确定主角。\n再设计结局。",
@@ -202,6 +233,7 @@ class HttpModelGatewayTest {
         int first=json.indexOf("\\n")+1,second=Math.min(json.length(),first+9);
         List<String> chunks=List.of(json.substring(0,first),json.substring(first,second),json.substring(second));
         StringBuilder sse=new StringBuilder();
+        sse.append("data: ").append(mapper.writeValueAsString(Map.of("choices",List.of()))).append("\n\n");
         for(String chunk:chunks) sse.append("data: ").append(mapper.writeValueAsString(Map.of("choices",List.of(
                 Map.of("index",0,"delta",Map.of("content",chunk)))))).append("\n\n");
         sse.append("data: ").append(mapper.writeValueAsString(Map.of("choices",List.of(
@@ -221,6 +253,33 @@ class HttpModelGatewayTest {
         assertThat(stages).containsSubsequence("CONNECTING","GENERATING","FINALIZING");
         assertThat(mapper.readTree(received.get()).path("stream").asBoolean()).isTrue();
     }
+    @Test void dialogueStreamTimesOutWhenProviderNeverFinishesTheResponseBody() throws Exception {
+        CountDownLatch release=new CountDownLatch(1);
+        server.createContext("/hanging/chat/completions",exchange->{
+            exchange.getRequestBody().readAllBytes();
+            exchange.getResponseHeaders().add("Content-Type","text/event-stream");
+            exchange.sendResponseHeaders(200,0);
+            String partial=mapper.writeValueAsString(Map.of("choices",List.of(
+                    Map.of("index",0,"delta",Map.of("content","{\\\"reply\\\":\\\"正在生成")))));
+            exchange.getResponseBody().write(("data: "+partial+"\n\n").getBytes(StandardCharsets.UTF_8));
+            exchange.getResponseBody().flush();
+            try { release.await(5,TimeUnit.SECONDS); } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            } finally { exchange.close(); }
+        });
+        var hanging=new HttpModelGateway(mapper,"http://127.0.0.1:"+server.getAddress().getPort()+"/hanging",
+                "","fixture",1,1000,"max_tokens","none");
+        ModelGateway.DialogueStream stream=new ModelGateway.DialogueStream() {
+            public void stage(String stage){}
+            public void text(String delta){}
+            public boolean cancelled(){return false;}
+        };
+        try {
+            assertThatThrownBy(()->hanging.dialogue(new ModelGateway.DialogueRequest("{}"),stream))
+                    .isInstanceOf(Problem.class)
+                    .hasMessageContaining("MODEL_TIMEOUT");
+        } finally { release.countDown(); }
+    }
     @Test void refusesTruncatedOrInvalidOutputWithoutFallingBackToDemo() throws Exception {
         var gateway=gateway();
         reply(Map.of("content","不完整"),"length");
@@ -239,6 +298,20 @@ class HttpModelGatewayTest {
 
         reply(Map.of("operations",List.of(Map.of("op","REPLACE_TEXT","field","content","oldText","不存在的旧句","newText","新句"))),"stop");
         assertThatThrownBy(()->gateway().generate(rewriteRequest())).hasMessageContaining("不存在","无法安全应用","原有内容未覆盖");
+    }
+    @Test void chapterContentRequestCannotSucceedWithSummaryOnlyPatch() throws Exception {
+        ModelGateway.Request full=chapterRewriteRequest();
+        ModelGateway.Request local=new ModelGateway.Request(full.action(),full.novel(),full.target(),full.context(),
+                "请修订当前章节正文并改善情节推进");
+        reply(Map.of("operations",List.of(Map.of("op","SET_FIELD","field","summary","value","只改了摘要"))),"stop");
+        assertThatThrownBy(()->gateway().generate(local))
+                .hasMessageContaining("没有按本次要求修改正文")
+                .hasMessageContaining("未创建相同正文的新版本");
+
+        ModelGateway.Request summaryOnly=new ModelGateway.Request(full.action(),full.novel(),full.target(),full.context(),
+                "只补充摘要，不修改正文");
+        reply(Map.of("operations",List.of(Map.of("op","SET_FIELD","field","summary","value","新摘要"))),"stop");
+        assertThat(gateway().generate(summaryOnly).summary()).isEqualTo("新摘要");
     }
     @Test void missingConfigurationAndInsecureRemoteEndpointsFailClearly() {
         var missing=new HttpModelGateway(mapper,"","","",5,1000,"max_tokens","none");
@@ -290,7 +363,10 @@ class HttpModelGatewayTest {
     }
     @Test void validatesRequiredFieldsDefaultsMissingCompletionFlagsAndNeverCoercesBooleans() throws Exception {
         reply(Map.of("content","只有正文"),"stop");
-        assertThatThrownBy(()->gateway().generate(request())).hasMessageContaining("必要字段");
+        var untitled=gateway().generate(request());
+        assertThat(untitled.content()).isEqualTo("只有正文");
+        assertThat(untitled.title()).isEqualTo("待命名草稿");
+        assertThat(untitled.draftIssues()).contains("标题缺失或为空，请补全标题后重新检查");
         reply(Map.of("passed",true,"issues",List.of()),"stop");
         Review withoutCompletionFlags=gateway().review(request(),generated());
         assertThat(withoutCompletionFlags.passed()).isTrue();
@@ -597,8 +673,12 @@ class HttpModelGatewayTest {
         reply(generated(),"stop");
         deepseek.generate(request());
         body=mapper.readTree(received.get());
-        assertThat(body.path("thinking").path("type").asText()).isEqualTo("enabled");
-        assertThat(body.path("reasoning_effort").asText()).isEqualTo("high");
+        assertThat(body.path("thinking").path("type").asText()).isEqualTo("disabled");
+        assertThat(body.has("reasoning_effort")).isFalse();
+        assertThat(body.path("messages").get(0).path("content").asText())
+                .contains("你是小说大纲主笔")
+                .contains("原始简介不是可随意删改的候选摘要")
+                .doesNotContain("CHAPTER 文风规则");
 
         reply(generated(),"stop");
         deepseek.outlineFoundation(request());
@@ -615,6 +695,8 @@ class HttpModelGatewayTest {
         assertThat(body.path("max_tokens").asInt()).isEqualTo(12000);
         assertThat(body.path("thinking").path("type").asText()).isEqualTo("disabled");
         assertThat(body.has("reasoning_effort")).isFalse();
+        assertThat(body.path("messages").get(0).path("content").asText())
+                .contains("CHAPTER 文风规则");
 
         reply(generated(),"stop");
         deepseek.generate(planRequest());
@@ -639,6 +721,17 @@ class HttpModelGatewayTest {
         assertThat(body.path("max_tokens").asInt()).isEqualTo(4000);
         assertThat(body.path("thinking").path("type").asText()).isEqualTo("disabled");
         assertThat(body.has("reasoning_effort")).isFalse();
+    }
+    @Test void recognizesCurrentDeepSeekFlashAliasAndDisablesThinkingForFullOutline() throws Exception {
+        var deepseek=new HttpModelGateway(mapper,baseUrl,"","deepseek-flash",5,24000,"auto","json_object");
+        reply(generated(),"stop");
+        deepseek.generate(request());
+        JsonNode body=mapper.readTree(received.get());
+        assertThat(body.path("model").asText()).isEqualTo("deepseek-flash");
+        assertThat(body.path("thinking").path("type").asText()).isEqualTo("disabled");
+        assertThat(body.path("max_tokens").asInt()).isEqualTo(24000);
+        assertThat(body.has("max_completion_tokens")).isFalse();
+        assertThat(body.path("response_format").path("type").asText()).isEqualTo("json_object");
     }
     @Test void fullContentReplacementIsRejectedOutsideChapterArtifacts() throws Exception {
         reply(Map.of("operations",List.of(Map.of("op","SET_CONTENT","value","不应允许的人物设定整份替换"))),"stop");

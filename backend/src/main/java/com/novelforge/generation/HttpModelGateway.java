@@ -46,7 +46,7 @@ public class HttpModelGateway implements ModelGateway {
         @Value("${NOVELFORGE_TOKEN_LIMIT_FIELD:auto}") String tokenField,
         @Value("${novelforge.model.response-format:none}") String responseFormat) {
         this.mapper=mapper; this.baseUrl=baseUrl; this.apiKey=apiKey; this.model=canonicalModel(model);
-        this.deepSeek=Set.of("deepseek-v4-flash","deepseek-v4-pro","deepseek-v4-flash-vision-exp").contains(this.model);
+        this.deepSeek=Set.of("deepseek-flash","deepseek-v4-flash","deepseek-v4-pro","deepseek-v4-flash-vision-exp").contains(this.model);
         this.timeout=timeout; this.maxTokens=maxTokens;
         this.tokenField="auto".equals(tokenField) ? (deepSeek ? "max_tokens" : "max_completion_tokens") : tokenField;
         this.responseFormat=responseFormat; this.outputReader=new ModelJsonReader(mapper);
@@ -65,24 +65,34 @@ public class HttpModelGateway implements ModelGateway {
         if (request.action()==Action.REWRITE) return withStage("写作生成",()->{
             if (request.target()==null || request.target().latest()==null) throw new Problem(409,"修订目标不存在或没有版本");
             if (request.target().kind==com.novelforge.novel.Novel.Kind.OUTLINE)
-                return call("prompts/writer.txt",input(request,null,false),Generated.class,
+                return call("prompts/outline-architect.txt",input(request,null,false),Generated.class,
                         false,maxTokens,"outline-rewrite");
             if (request.target().kind==com.novelforge.novel.Novel.Kind.CHAPTER && fullChapterRewrite(request.instructions())) {
                 Generated rewritten=call("prompts/chapter-rewriter.txt",input(request,null,false),Generated.class,
                         false,maxTokens,"chapter-rewrite");
-                return new Generated(rewritten.title(),rewritten.content(),rewritten.summary(),rewritten.facts(),null);
+                Generated result=new Generated(rewritten.title(),rewritten.content(),rewritten.summary(),rewritten.facts(),null);
+                requireRequestedChapterChange(request,result);
+                return result;
             }
             int rewriteLimit=request.target().kind==com.novelforge.novel.Novel.Kind.CHAPTER ? maxTokens : Math.min(maxTokens,4000);
             RewritePatch patch=call("prompts/rewriter.txt",input(request,null,false),RewritePatch.class,
                     false,rewriteLimit,"rewrite");
-            if (request.instructions()!=null && request.instructions().startsWith(StylePatchGuard.INSTRUCTION_MARKER))
-                return StylePatchGuard.apply(request.target().latest(),patch,request.target().kind);
-            return RewritePatchApplier.apply(request.target().latest(),patch,request.target().kind);
+            Generated result=request.instructions()!=null && request.instructions().startsWith(StylePatchGuard.INSTRUCTION_MARKER)
+                    ?StylePatchGuard.apply(request.target().latest(),patch,request.target().kind)
+                    :RewritePatchApplier.apply(request.target().latest(),patch,request.target().kind);
+            requireRequestedChapterChange(request,result);
+            return result;
         });
-        // DeepSeek reasoning tokens share the completion budget. Plans and long chapter prose must
-        // reserve that budget for the structured final JSON instead of risking reasoning-only output.
-        boolean thinking=request.action()==Action.OUTLINE || request.action()==Action.CHARACTERS;
-        return withStage("写作生成", () -> call("prompts/writer.txt", input(request, null, false), Generated.class,
+        // DeepSeek reasoning tokens share the completion budget. The full structured outline is
+        // larger than most chapters, and the separate foundation/review agents already provide
+        // deliberation. Reserve the writer's budget for a complete final JSON response.
+        boolean thinking=request.action()==Action.CHARACTERS;
+        String prompt=switch(request.action()) {
+            case OUTLINE -> "prompts/outline-architect.txt";
+            case PLAN -> "prompts/plan-writer.txt";
+            default -> "prompts/writer.txt";
+        };
+        return withStage("写作生成", () -> call(prompt, input(request, null, false), Generated.class,
                 thinking,maxTokens,"generate"));
     }
 
@@ -106,9 +116,33 @@ public class HttpModelGateway implements ModelGateway {
         String text=instructions.replaceAll("\\s+","");
         return text.contains("整章重写") || text.contains("重写整章") || text.contains("整体重写本章");
     }
+    private void requireRequestedChapterChange(Request request,Generated result) {
+        if(request.target().kind!=com.novelforge.novel.Novel.Kind.CHAPTER || request.target().latest()==null) return;
+        String instruction=request.instructions()==null?"":request.instructions().replaceAll("\\s+","");
+        boolean contentRequested=fullChapterRewrite(instruction)
+                || instruction.contains("正文") && List.of("修改","修订","改写","重写","润色","删减","调整","删除","补写")
+                .stream().anyMatch(instruction::contains);
+        boolean explicitlyUnchanged=List.of("不修改正文","正文不变","正文保持不变","只补充摘要","仅补充摘要","只修改标题")
+                .stream().anyMatch(instruction::contains);
+        if(contentRequested && !explicitlyUnchanged
+                && Objects.equals(request.target().latest().content,result.content()))
+            throw new Problem(502,"模型没有按本次要求修改正文；未创建相同正文的新版本，请明确修改范围后重试，原有内容未覆盖");
+    }
     public Review review(Request request, Generated candidate) {
         return withStage(request.action()==Action.COMPLETE ? "完结检查" : "一致性检查", () -> {
             Review review=call("prompts/reviewer.txt", input(request, candidate, true), Review.class,false,maxTokens,"review");
+            if (candidate!=null && candidate.plan()!=null
+                    && (request.action()==Action.PLAN || request.target()!=null
+                    && request.target().kind==com.novelforge.novel.Novel.Kind.PLAN)) {
+                String focusedInput=planCausalityInput(request,candidate);
+                PlanCausalityAudit audit=call("prompts/plan-causality-auditor.txt",focusedInput,
+                        PlanCausalityAudit.class,false,Math.min(maxTokens,4000),"plan-causality-audit");
+                try {
+                    review=audit.merge(review,candidate,mapper.readTree(focusedInput).path("context"));
+                } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+                    throw new Problem(500,"[REQUEST_ENCODING] 本地章节规划因果检查结果无法读取；候选版本仍保留");
+                }
+            }
             if (candidate!=null && request.target()!=null && request.target().kind==com.novelforge.novel.Novel.Kind.CHAPTER) {
                 ChapterEvidenceAudit audit=call("prompts/chapter-auditor.txt",chapterAuditInput(request,candidate),
                         ChapterEvidenceAudit.class,false,maxTokens,"chapter-audit");
@@ -116,6 +150,22 @@ public class HttpModelGateway implements ModelGateway {
             }
             return review;
         });
+    }
+
+    private String planCausalityInput(Request request,Generated candidate) {
+        try {
+            ObjectNode context=(ObjectNode)mapper.readTree(request.context().json());
+            context.remove("revisionTarget");
+            JsonNode accepted=context.remove("acceptedReferences");
+            if(accepted!=null) context.set("authoritativeReferences",accepted);
+            var input=new LinkedHashMap<String,Object>();
+            input.put("context",context);
+            input.put("candidatePlan",candidate.plan());
+            input.put("instructions",request.instructions());
+            return mapper.writeValueAsString(input);
+        } catch(Exception failure) {
+            throw new Problem(500,"[REQUEST_ENCODING] 本地章节规划因果检查请求无法编码；候选版本仍保留");
+        }
     }
 
     public Review styleReview(Request request, Generated candidate) {
@@ -317,6 +367,7 @@ public class HttpModelGateway implements ModelGateway {
     private DialogueResponse streamDialogue(String prompt,String input,DialogueStream stream) {
         if (!ready()) throw new Problem(503,"请配置模型地址 NOVELFORGE_MODEL_BASE_URL 和模型名 NOVELFORGE_MODEL_NAME");
         var trace=new Trace("creative-dialogue-stream");
+        long deadlineNanos=System.nanoTime()+TimeUnit.SECONDS.toNanos(timeout);
         AtomicReference<CompletableFuture<HttpResponse<InputStream>>> pending=new AtomicReference<>();
         AtomicReference<InputStream> responseBody=new AtomicReference<>();
         stream.onCancel(()->{
@@ -354,7 +405,7 @@ public class HttpModelGateway implements ModelGateway {
             CompletableFuture<HttpResponse<InputStream>> future=client.sendAsync(builder.build(),HttpResponse.BodyHandlers.ofInputStream());
             pending.set(future);
             if (stream.cancelled()) { future.cancel(true); throw new Problem(409,"[CANCELLED] 本次对话已停止"); }
-            HttpResponse<InputStream> response=future.get(timeout,TimeUnit.SECONDS);
+            HttpResponse<InputStream> response=future.get(remainingMillis(deadlineNanos),TimeUnit.MILLISECONDS);
             responseBody.set(response.body()); trace.headers(response);
             if (response.statusCode()!=200) { response.body().close(); throw httpFailure(response.statusCode()); }
             if (stream.cancelled()) throw new Problem(409,"[CANCELLED] 本次对话已停止");
@@ -367,7 +418,9 @@ public class HttpModelGateway implements ModelGateway {
             String media=response.headers().firstValue("Content-Type").orElse("").toLowerCase(Locale.ROOT);
             String finalContent;
             if (media.contains("text/event-stream")) {
-                DialogueSseState state=readDialogueStream(decodedBody,stream);
+                InputStream finalBody=decodedBody;
+                DialogueSseState state=readBodyWithinDeadline(
+                        ()->readDialogueStream(finalBody,stream),finalBody,deadlineNanos);
                 trace.bytes=(int)state.bytes; trace.reasoning=state.reasoning;
                 trace.outputTokens=state.outputTokens; trace.reasoningTokens=state.reasoningTokens;
                 if (!"stop".equals(state.finish)) {
@@ -376,7 +429,9 @@ public class HttpModelGateway implements ModelGateway {
                 }
                 finalContent=state.content.toString();
             } else {
-                byte[] bytes=decodedBody.readNBytes(BoundedModelBody.LIMIT+1);
+                InputStream finalBody=decodedBody;
+                byte[] bytes=readBodyWithinDeadline(
+                        ()->finalBody.readNBytes(BoundedModelBody.LIMIT+1),finalBody,deadlineNanos);
                 if (bytes.length>BoundedModelBody.LIMIT) throw new Problem(502,"[RESPONSE_TOO_LARGE] 模型响应超过 4MB 限制");
                 trace.bytes=bytes.length;
                 var decoded=responseDecoder.decode(bytes,media,"");
@@ -417,6 +472,31 @@ public class HttpModelGateway implements ModelGateway {
         }
     }
 
+    private long remainingMillis(long deadlineNanos) throws TimeoutException {
+        long remaining=deadlineNanos-System.nanoTime();
+        if (remaining<=0) throw new TimeoutException("model response deadline exceeded");
+        return Math.max(1,TimeUnit.NANOSECONDS.toMillis(remaining));
+    }
+
+    private <T> T readBodyWithinDeadline(Callable<T> read,InputStream body,long deadlineNanos) throws Exception {
+        FutureTask<T> task=new FutureTask<>(read);
+        Thread reader=Thread.ofVirtual().name("novelforge-model-stream-reader").start(task);
+        try {
+            return task.get(remainingMillis(deadlineNanos),TimeUnit.MILLISECONDS);
+        } catch (TimeoutException error) {
+            task.cancel(true);
+            try { body.close(); } catch (IOException ignored) {}
+            throw error;
+        } catch (ExecutionException error) {
+            Throwable cause=error.getCause();
+            if (cause instanceof Exception exception) throw exception;
+            if (cause instanceof Error fatal) throw fatal;
+            throw error;
+        } finally {
+            if (task.isCancelled()) reader.interrupt();
+        }
+    }
+
     private DialogueSseState readDialogueStream(InputStream input,DialogueStream stream) throws IOException {
         DialogueSseState state=new DialogueSseState();
         StringBuilder event=new StringBuilder();
@@ -454,7 +534,11 @@ public class HttpModelGateway implements ModelGateway {
             state.reasoningTokens=details.path("reasoning_tokens").asLong(-1);
         }
         JsonNode choices=node.path("choices");
-        if (choices.isArray()&&choices.isEmpty()&&usage.isObject()) return;
+        // OpenAI-compatible providers may emit an empty choices array as a
+        // heartbeat or a usage-only frame. It carries no author-visible text,
+        // so ignoring it is safe; the final completeness checks still require
+        // a normal finish reason and [DONE].
+        if (choices.isArray()&&choices.isEmpty()) return;
         if (!choices.isArray()||choices.size()!=1||!choices.get(0).isObject())
             throw new Problem(502,"[SSE_INVALID] 模型流式响应须有唯一 choices[0]");
         JsonNode choice=choices.get(0),delta=choice.path("delta");
@@ -570,7 +654,7 @@ public class HttpModelGateway implements ModelGateway {
         String value=raw==null ? "" : raw.strip();
         if (value.length()>1 && "'\"‘’".indexOf(value.charAt(0))>=0 && "'\"‘’".indexOf(value.charAt(value.length()-1))>=0)
             value=value.substring(1,value.length()-1).strip();
-        for (String id : List.of("deepseek-v4-flash","deepseek-v4-pro","deepseek-v4-flash-vision-exp"))
+        for (String id : List.of("deepseek-flash","deepseek-v4-flash","deepseek-v4-pro","deepseek-v4-flash-vision-exp"))
             if (id.equalsIgnoreCase(value)) return id;
         return value;
     }

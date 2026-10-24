@@ -6,6 +6,7 @@ import com.novelforge.generation.ReviewPolicy;
 import com.novelforge.generation.StyleReviewPolicy;
 import com.novelforge.generation.ContentReviewFingerprint;
 import com.novelforge.generation.ModelGateway;
+import com.novelforge.generation.PlanNarrativeRenderer;
 import com.novelforge.infrastructure.NovelRepository;
 import com.novelforge.novel.Novel;
 import com.novelforge.novel.Novel.*;
@@ -46,9 +47,32 @@ class WorkflowIntegrationTest {
     }
     Novel approve(String id) {
         Novel n=repository.get(id); Artifact a=rules.pending(n);
+        assertThat(a.latest().review.passed()).as("演示候选检查意见：%s",a.latest().review.issueDetails()).isTrue();
         return workflow.confirm(id,a.id,a.latest().id,n.revision,null);
     }
     Novel generateApprove(String id, Action action) { run(id,action,null); return approve(id); }
+
+    @Test void manualPlanEditAlwaysRendersDisplayAndSummaryFromStructuredBeats() {
+        Novel novel=create();
+        generateApprove(novel.id,Action.OUTLINE);
+        generateApprove(novel.id,Action.CHARACTERS);
+        generateApprove(novel.id,Action.PLAN);
+        Novel before=repository.get(novel.id);
+        Artifact artifact=rules.plans(before).getFirst();
+        Version base=artifact.latest();
+        Plan changedPlan=base.plan;
+        ChapterBeat first=changedPlan.chapters.getFirst();
+        changedPlan.chapters.set(0,new ChapterBeat(first.number(),first.title(),
+                first.purpose()+"，实际收到书面意向",first.targetWords(),first.sceneBeats(),
+                first.revealBoundary(),first.endingHook()));
+        Novel edited=workflow.edit(novel.id,artifact.id,new WorkflowService.Edit(base.id,base.title,
+                "故意传入的旧展示文本","故意传入的旧摘要",base.facts,changedPlan,"调整进度",before.revision));
+        Version actual=rules.artifact(edited,artifact.id).latest();
+        assertThat(actual.content).isEqualTo(PlanNarrativeRenderer.render(changedPlan))
+                .contains("实际收到书面意向").doesNotContain("故意传入");
+        assertThat(actual.summary).isEqualTo(PlanNarrativeRenderer.summary(changedPlan))
+                .doesNotContain("故意传入");
+    }
 
     @Test void completeFiveChapterLoopWithEarlyNextPlanAndExplicitFinalApproval() {
         Novel n=create();
@@ -94,7 +118,7 @@ class WorkflowIntegrationTest {
         assertThat(workflow.confirm(n.id,a.id,a.latest().id,0,null).revision).isEqualTo(approved.revision);
         assertThat(repository.get(n.id).artifacts).hasSize(1);
     }
-    @Test void editingTailInvalidatesAlreadyCreatedFuturePlanAndRepairsWithoutDeadlock() {
+    @Test void editingTailInvalidatesFuturePlanOnlyAfterConfirmationAndRepairsWithoutDeadlock() {
         Novel n=create();
         generateApprove(n.id,Action.OUTLINE); generateApprove(n.id,Action.CHARACTERS);
         generateApprove(n.id,Action.PLAN); generateApprove(n.id,Action.CHAPTER);
@@ -106,16 +130,88 @@ class WorkflowIntegrationTest {
         workflow.edit(n.id,chapter.id,new WorkflowService.Edit(v.id,v.title,v.content+"\n许岚重新核对日期。",v.summary+"重新核对日期。",v.facts,null,"调整调查过程",before.revision));
         Novel edited=repository.get(n.id);
         assertThat(rules.pending(edited).id).isEqualTo(chapter.id);
-        assertThat(rules.artifact(edited,futurePlan.id).needsRevision).isTrue();
+        assertThat(rules.artifact(edited,futurePlan.id).needsRevision).isFalse();
         assertThat(rules.artifact(edited,chapter.id).versions).hasSize(2);
         assertThatThrownBy(()->workflow.confirm(n.id,chapter.id,rules.artifact(edited,chapter.id).latest().id,edited.revision,null)).hasMessageContaining("检查");
         run(n.id,Action.REVIEW,chapter.id); approve(n.id);
         Novel sourceConfirmed=repository.get(n.id);
+        assertThat(rules.artifact(sourceConfirmed,futurePlan.id).needsRevision).isTrue();
         assertThat(rules.pending(sourceConfirmed).id).isEqualTo(futurePlan.id);
         var ctx=contexts.assemble(sourceConfirmed,Action.REWRITE,futurePlan.id);
         assertThat(ctx.sourceVersions()).contains(rules.artifact(sourceConfirmed,chapter.id).approvedVersionId);
         run(n.id,Action.REWRITE,futurePlan.id); approve(n.id);
         assertThat(rules.nextAction(repository.get(n.id))).isEqualTo("CHAPTER");
+    }
+
+    @Test void summaryOnlyEditReusesEvidenceBackedChapterState() {
+        Novel n=create();
+        generateApprove(n.id,Action.OUTLINE); generateApprove(n.id,Action.CHARACTERS);
+        generateApprove(n.id,Action.PLAN); run(n.id,Action.CHAPTER,null);
+        repository.update(n.id,stored->{
+            Version version=rules.pending(stored).latest();
+            version.styleReview=new Review(true,List.of(),false,false,false);
+            version.styleReviewPolicyVersion=StyleReviewPolicy.VERSION;
+            version.stylePolishRound=1;
+            return stored;
+        });
+        Novel before=repository.get(n.id);
+        Artifact chapter=rules.pending(before);
+        Version base=chapter.latest();
+        assertThat(base.stateExtractionStatus).isEqualTo(StateExtractionStatus.SUCCEEDED);
+
+        workflow.edit(n.id,chapter.id,new WorkflowService.Edit(base.id,base.title,base.content,
+                base.summary+"摘要措辞修正。",List.of(),null,"只纠正摘要措辞",before.revision));
+
+        Version edited=rules.artifact(repository.get(n.id),chapter.id).latest();
+        assertThat(edited.stateExtractionStatus).isEqualTo(StateExtractionStatus.SUCCEEDED);
+        assertThat(edited.stateExtractionSourceHash).isEqualTo(base.stateExtractionSourceHash);
+        assertThat(edited.facts).isEqualTo(base.facts);
+        assertThat(edited.stateEvidence).isEqualTo(base.stateEvidence);
+        assertThat(edited.styleReview).isEqualTo(base.styleReview);
+        assertThat(edited.stylePolishRound).isEqualTo(1);
+    }
+
+    @Test void dismissingAnUnconfirmedUpstreamCandidateLeavesDownstreamContentUntouched() {
+        Novel n=create();
+        generateApprove(n.id,Action.OUTLINE); generateApprove(n.id,Action.CHARACTERS);
+        Novel before=repository.get(n.id); Artifact outline=before.artifacts.getFirst(); Version base=outline.latest();
+        workflow.editOutline(n.id,outline.id,new WorkflowService.OutlineEdit(base.id,base.title,
+                base.summary+"候选摘要",base.outlineSpec,"测试候选撤销",before.revision));
+
+        Novel staged=repository.get(n.id); Artifact characters=staged.artifacts.get(1);
+        assertThat(characters.needsRevision).isFalse();
+        Version candidate=rules.artifact(staged,outline.id).latest();
+        Novel dismissed=workflow.dismissCandidate(n.id,outline.id,candidate.id,staged.revision);
+
+        assertThat(rules.artifact(dismissed,outline.id).latest().id).isEqualTo(base.id);
+        assertThat(rules.artifact(dismissed,characters.id).needsRevision).isFalse();
+        assertThat(dismissed.changes).isEmpty();
+    }
+
+    @Test void explicitRewriteFromChapterPreservesVersionsAndQueuesPlanBeforeHistory() {
+        Novel n=create();
+        generateApprove(n.id,Action.OUTLINE); generateApprove(n.id,Action.CHARACTERS);
+        generateApprove(n.id,Action.PLAN); generateApprove(n.id,Action.CHAPTER);
+        generateApprove(n.id,Action.PLAN); generateApprove(n.id,Action.CHAPTER); generateApprove(n.id,Action.CHAPTER);
+        Novel before=repository.get(n.id);
+        Artifact chapterOne=before.artifacts.stream().filter(a->a.kind==Kind.CHAPTER&&a.chapterNumber==1).findFirst().orElseThrow();
+        String approvedChapterVersion=chapterOne.approvedVersionId;
+        Artifact firstPlan=before.artifacts.stream().filter(a->a.kind==Kind.PLAN&&a.approved().plan.startChapter<=1
+                &&a.approved().plan.endChapter>=1).findFirst().orElseThrow();
+        String approvedPlanVersion=firstPlan.approvedVersionId;
+
+        Novel queued=workflow.beginChapterRewrite(n.id,1,"把前三章改成更快兑现的爽文节奏",before.revision);
+
+        Artifact queuedPlan=rules.artifact(queued,firstPlan.id);
+        Artifact queuedChapter=rules.artifact(queued,chapterOne.id);
+        assertThat(rules.pending(queued).id).isEqualTo(firstPlan.id);
+        assertThat(rules.nextAction(queued)).isEqualTo("REPAIR");
+        assertThat(queuedPlan.needsRevision).isTrue();
+        assertThat(queuedChapter.needsRevision).isTrue();
+        assertThat(queuedPlan.approvedVersionId).isEqualTo(approvedPlanVersion);
+        assertThat(queuedChapter.approvedVersionId).isEqualTo(approvedChapterVersion);
+        assertThat(queued.changes.getLast().affectedArtifactIds).contains(firstPlan.id,chapterOne.id);
+        assertThat(queued.changes.getLast().reason).contains("从第1章重新创作","爽文节奏");
     }
     @Test void budgetCannotBeBypassedByReviewOverrideAndNeedsExplicitExpansion() {
         Novel n=create();
@@ -215,6 +311,20 @@ class WorkflowIntegrationTest {
         version.summary="终章已经结束，finalBatch=true。";
         assertThatThrownBy(()->rules.validateVersion(n,plan,version))
                 .hasMessageContaining("摘要","系统内部标识“finalBatch”","自然语言");
+    }
+    @Test void planStateLedgerCannotReferenceAChapterOutsideItsBatch() {
+        Novel novel=create();Artifact artifact=new Artifact();artifact.kind=Kind.PLAN;artifact.batchNumber=1;
+        Version version=new Version();version.title="首批规划";version.content="第一章发生关键变化。";
+        version.summary="主角取得旧照片。";version.facts=List.of();
+        Plan plan=new Plan();plan.startChapter=1;plan.endChapter=1;plan.prepareNextAfterChapter=1;
+        plan.finalBatch=true;plan.triggerReason="结局";plan.handoff="故事收束";plan.assumptions="无";
+        plan.chapters=List.of(new ChapterBeat(1,"旧照片","主角找到火灾前的照片"));
+        plan.criticalTransitions=List.of(new CriticalTransition(2,"照片","未找到","发现照片",
+                "已取得","正文发生","火灾前拍摄"));
+        version.plan=plan;
+
+        assertThatThrownBy(()->rules.validateVersion(novel,artifact,version))
+                .hasMessageContaining("关键状态变化的章节编号必须在本批规划范围内");
     }
     @Test void noOpManualEditDoesNotCreateVersionOrInvalidateFollowingContent() {
         Novel n=create();generateApprove(n.id,Action.OUTLINE);generateApprove(n.id,Action.CHARACTERS);

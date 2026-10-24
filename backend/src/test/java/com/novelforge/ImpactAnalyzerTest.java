@@ -28,4 +28,31 @@ class ImpactAnalyzerTest {
         assertThat(impact.changed(outline.latest(),"标题","内容","摘要",List.of(),null)).isFalse();
         assertThat(impact.changed(outline.latest(),"标题","修改后的内容","摘要",List.of(),null)).isTrue();
     }
+
+    @Test void revisedPlanNeverInvalidatesAlreadyConfirmedChapterHistory() {
+        Novel n=new Novel(); Artifact plan=artifact(Kind.PLAN); Artifact chapter=artifact(Kind.CHAPTER,plan.latest().id);
+        chapter.chapterNumber=1; Artifact futurePlan=artifact(Kind.PLAN,plan.latest().id);
+        n.artifacts.addAll(List.of(plan,chapter,futurePlan));
+
+        var preview=impact.previewFollowing(n,plan);
+
+        assertThat(preview).containsExactly(futurePlan.id);
+        assertThat(preview).doesNotContain(chapter.id);
+    }
+
+    @Test void confirmingRevisedPlanMarksOnlyDependentUnconfirmedWorkForRepair() {
+        Novel n=new Novel(); Artifact plan=artifact(Kind.PLAN);
+        Artifact confirmed=artifact(Kind.CHAPTER,plan.latest().id);confirmed.chapterNumber=1;
+        Artifact draft=artifact(Kind.CHAPTER,plan.latest().id);draft.chapterNumber=2;
+        draft.approvedVersionId=null;
+        Artifact nextPlan=artifact(Kind.PLAN,draft.latest().id);
+        n.artifacts.addAll(List.of(plan,confirmed,draft,nextPlan));
+
+        var change=impact.invalidateFollowing(n,plan,"第七章照片时间修正");
+
+        assertThat(change.affectedArtifactIds).containsExactly(draft.id,nextPlan.id);
+        assertThat(confirmed.needsRevision).isFalse();
+        assertThat(draft.needsRevision).isTrue();
+        assertThat(nextPlan.needsRevision).isTrue();
+    }
 }

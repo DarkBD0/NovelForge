@@ -119,6 +119,8 @@ public class Novel {
         public List<StateRelation> stateRelations = new ArrayList<>();
         public long basedOnRevision;
         public List<String> sourceVersionIds = new ArrayList<>();
+        /** Applied to downstream artifacts only after this candidate is confirmed. */
+        public String pendingImpactReason;
         public boolean previousNeedsRevision;
         /** Rejected candidates remain in history but no longer participate in workflow state. */
         public boolean dismissed;
@@ -135,6 +137,19 @@ public class Novel {
         public String handoff;
         public String assumptions;
         public List<ChapterBeat> chapters = new ArrayList<>();
+        /** Internal cross-chapter checkpoints, not a mandatory scene list or reader-facing prose. */
+        public List<CriticalTransition> criticalTransitions = new ArrayList<>();
+    }
+    public record CriticalTransition(int chapterNumber, String subject, String before, String change,
+                                     String after, String visibility, String evidenceTime,
+                                     String inferenceBoundary) {
+        public CriticalTransition {
+            inferenceBoundary=inferenceBoundary==null||inferenceBoundary.isBlank()?"不适用":inferenceBoundary;
+        }
+        public CriticalTransition(int chapterNumber,String subject,String before,String change,String after,
+                                  String visibility,String evidenceTime) {
+            this(chapterNumber,subject,before,change,after,visibility,evidenceTime,"不适用");
+        }
     }
     /**
      * A chapter-level writing brief. The last four fields are advisory and may be
@@ -325,6 +340,8 @@ public class Novel {
         public String userMessageId;
         public String assistantMessageId;
         public ConversationTurnStatus status = ConversationTurnStatus.RUNNING;
+        /** Structured dialogue routing result: DISCUSS, EXECUTE or UNCLEAR. */
+        public String intent;
         public String stage = "UNDERSTANDING";
         public int attempt = 1;
         public String error;

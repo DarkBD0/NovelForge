@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.novelforge.generation.AgentOrchestrator;
 import com.novelforge.generation.ModelGateway;
+import com.novelforge.generation.RequirementAuthority;
 import com.novelforge.infrastructure.NovelRepository;
 import com.novelforge.novel.Novel;
 import com.novelforge.novel.Novel.*;
@@ -35,12 +36,13 @@ public class ConversationService {
     private final ObjectMapper mapper;
     private final WorkflowService workflow;
     private final ConversationEventHub events;
+    private final RequirementAuthority requirementAuthority;
     private final ConcurrentMap<String,TurnControl> activeTurns=new ConcurrentHashMap<>();
 
     public ConversationService(NovelRepository repository,AgentOrchestrator agents,TaskService tasks,ObjectMapper mapper,
-                               WorkflowService workflow,ConversationEventHub events) {
+                               WorkflowService workflow,ConversationEventHub events,RequirementAuthority requirementAuthority) {
         this.repository=repository; this.agents=agents; this.tasks=tasks; this.mapper=mapper; this.workflow=workflow;
-        this.events=events;
+        this.events=events; this.requirementAuthority=requirementAuthority;
     }
 
     public List<ConversationSession> list(String novelId) {
@@ -174,9 +176,19 @@ public class ConversationService {
                 new ModelGateway.DialogueRequest(dialogueContext(snapshot,frozen,user)),control);
         require(response.reply()!=null&&!response.reply().isBlank(),"创作对话没有返回回复");
         require(response.reply().length()<=20000,"创作对话回复过长，未保存不完整结果");
-        boolean immediateExecution=immediateOutlineExecutionRequested(user.content);
+        boolean fallbackExecution=immediateOutlineExecutionRequested(user.content);
+        boolean structuredExecution="EXECUTE".equals(response.intent());
+        // UNCLEAR is an explicit request for one more author choice and must not be
+        // overridden by keywords. The deterministic fallback only rescues a missed
+        // EXECUTE classification from DISCUSS/legacy responses.
+        boolean executionRequested=structuredExecution
+                ||("DISCUSS".equals(response.intent())&&fallbackExecution);
+        List<ModelGateway.ProjectUpdateCandidate> projectUpdates=response.projectUpdateCandidates().stream()
+                .filter(item->explicitProjectFieldChangeRequested(user.content,item.field()))
+                .limit(4).toList();
         ModelGateway.DialogueProposal modelAction=response.actionProposal();
-        if (modelAction==null&&immediateExecution&&response.projectUpdateCandidates().isEmpty())
+        if (!executionRequested) modelAction=null;
+        if (modelAction==null&&executionRequested&&projectUpdates.isEmpty())
             modelAction=new ModelGateway.DialogueProposal("GENERATE_OR_REVISE_OUTLINE",
                     "根据作者本轮明确要求生成或修订全书大纲："+user.content);
         ModelGateway.DialogueProposal requestedAction=modelAction;
@@ -187,7 +199,8 @@ public class ConversationService {
             require(turn.status==ConversationTurnStatus.RUNNING,"这条消息已经结束，不能重复写入回复");
             ConversationMessage assistant=new ConversationMessage(); assistant.role=ConversationRole.ASSISTANT;
             assistant.content=response.reply().strip(); session.messages.add(assistant);
-            turn.assistantMessageId=assistant.id; turn.status=ConversationTurnStatus.SUCCEEDED; turn.stage="COMPLETED";
+            turn.assistantMessageId=assistant.id; turn.status=ConversationTurnStatus.SUCCEEDED;
+            turn.intent=response.intent(); turn.stage="COMPLETED";
             turn.error=null; turn.finishedAt=Novel.now();
             for (ModelGateway.DialogueDecision item:response.decisionCandidates().stream().limit(12).toList()) {
                 if (item.text()==null||item.text().isBlank()||item.text().length()>2000) continue;
@@ -196,10 +209,14 @@ public class ConversationService {
                 session.decisions.add(decision);
             }
             Set<ProjectField> updateFields=EnumSet.noneOf(ProjectField.class);
-            for (ModelGateway.ProjectUpdateCandidate item:response.projectUpdateCandidates().stream().limit(4).toList()) {
+            for (ModelGateway.ProjectUpdateCandidate item:projectUpdates) {
                 ProjectField field;
                 try { field=ProjectField.valueOf(item.field()); } catch (RuntimeException ignored) { continue; }
                 if (!updateFields.add(field)||item.proposedValue()==null||item.proposedValue().isBlank()) continue;
+                session.projectUpdates.stream()
+                        .filter(existing->existing.field==field)
+                        .filter(existing->existing.status==ProjectUpdateStatus.PROPOSED||existing.status==ProjectUpdateStatus.ACCEPTED)
+                        .forEach(existing->existing.status=ProjectUpdateStatus.STALE);
                 ProjectUpdateProposal update=new ProjectUpdateProposal(); update.sourceMessageId=assistant.id;
                 update.field=field; update.previousValue=projectValue(snapshot,field);
                 update.proposedValue=item.proposedValue().strip();
@@ -212,7 +229,10 @@ public class ConversationService {
                 proposal.instructions=requestedAction.instructions()==null?"":requestedAction.instructions().strip();
                 proposal.baseRevision=session.baseRevision; proposal.baseVersionId=session.baseVersionId;
                 proposal.requestedByUserMessageId=user.id;
-                proposal.automaticExecution=immediateExecution&&response.projectUpdateCandidates().isEmpty();
+                // Returning an action proposal is the dialogue Agent's structured acknowledgement that
+                // this user message is an imperative, not a discussion. Generating a candidate is safe:
+                // the candidate still needs one final author approval before it becomes the active version.
+                proposal.automaticExecution=executionRequested&&projectUpdates.isEmpty();
                 session.proposals.add(proposal);
             }
             session.updatedAt=Novel.now(); return session;
@@ -314,18 +334,30 @@ public class ConversationService {
         });
     }
 
+    public ConversationSession rejectProjectUpdates(String novelId,String sessionId) {
+        return repository.update(novelId,n->{
+            ConversationSession session=session(n,sessionId); requireCurrent(n,session);
+            List<ProjectUpdateProposal> pending=session.projectUpdates.stream()
+                    .filter(item->item.status==ProjectUpdateStatus.PROPOSED||item.status==ProjectUpdateStatus.ACCEPTED)
+                    .toList();
+            require(!pending.isEmpty(),"没有等待撤销的项目信息修改");
+            pending.forEach(item->{item.status=ProjectUpdateStatus.REJECTED;item.decidedAt=Novel.now();});
+            session.updatedAt=Novel.now(); return session;
+        });
+    }
+
     public record ProjectApplyResult(ConversationSession session,ProjectBriefChange change) {}
     public ProjectApplyResult applyProjectUpdates(String novelId,String sessionId,long revision) {
-        return repository.update(novelId,n->{
+        ProjectApplyResult applied=repository.update(novelId,n->{
             workflow.expected(n,revision); workflow.idle(n);
             ConversationSession session=session(n,sessionId); requireCurrent(n,session);
             require(n.artifacts.stream().allMatch(a->a.kind==Kind.OUTLINE),
                     "人物设定或正文已经开始后，暂不能通过大纲对话修改项目信息");
             List<ProjectUpdateProposal> accepted=session.projectUpdates.stream()
-                    .filter(item->item.status==ProjectUpdateStatus.ACCEPTED).toList();
-            require(!accepted.isEmpty(),"请先采纳至少一项项目信息修改");
+                    .filter(item->item.status==ProjectUpdateStatus.PROPOSED||item.status==ProjectUpdateStatus.ACCEPTED).toList();
+            require(!accepted.isEmpty(),"没有等待应用的项目信息修改");
             require(accepted.stream().map(item->item.field).distinct().count()==accepted.size(),
-                    "同一字段存在多条已采纳修改，请只保留一条");
+                    "同一字段存在多条待处理修改，请重新对话生成一份完整修改");
             ProjectBriefChange change=new ProjectBriefChange(); change.conversationSessionId=session.id;
             change.previousRevision=n.revision;
             for (ProjectUpdateProposal update:accepted) {
@@ -350,14 +382,30 @@ public class ConversationService {
                 invalidation.reason="书名、简介、补充要求或目标字数已由作者更新，需要基于新资料复核大纲";
                 invalidation.affectedArtifactIds.add(outline.id); n.changes.add(invalidation); n.status="WRITING";
             }
+            ConversationSession rebased=rebaseSession(n,session,true);
             sessions(n).forEach(item->{
                 item.proposals.stream().filter(p->p.status==ProposalStatus.DRAFT).forEach(p->p.status=ProposalStatus.STALE);
                 item.projectUpdates.stream().filter(p->p.status==ProjectUpdateStatus.PROPOSED||p.status==ProjectUpdateStatus.ACCEPTED)
                         .forEach(p->p.status=ProjectUpdateStatus.STALE);
             });
-            ConversationSession rebased=rebaseSession(n,session);
             sessions(n).add(rebased); return new ProjectApplyResult(rebased,change);
         });
+        ActionProposal automatic=applied.session().proposals.stream()
+                .filter(item->item.status==ProposalStatus.DRAFT&&item.automaticExecution)
+                .reduce((first,second)->second).orElse(null);
+        if (automatic!=null) {
+            try {
+                execute(novelId,applied.session().id,automatic.id,Novel.uid(),applied.change().newRevision);
+            } catch (RuntimeException problem) {
+                repository.update(novelId,n->{
+                    ConversationSession current=session(n,applied.session().id);
+                    current.proposals.stream().filter(item->item.id.equals(automatic.id)).findFirst()
+                            .ifPresent(item->item.executionError=problem.getMessage()==null?"资料已保存，但未能继续生成大纲":problem.getMessage());
+                    current.updatedAt=Novel.now(); return null;
+                });
+            }
+        }
+        return new ProjectApplyResult(session(repository.get(novelId),applied.session().id),applied.change());
     }
 
     public Task execute(String novelId,String sessionId,String proposalId,String requestKey,long revision) {
@@ -373,20 +421,20 @@ public class ConversationService {
                     .orElseThrow(()->new Problem(409,"操作提案引用的对话简报不存在，请重新开始对话"));
             List<ConversationDecision> accepted=session.decisions.stream()
                     .filter(d->d.status==DecisionStatus.ACCEPTED).toList();
-            require(session.projectUpdates.stream().noneMatch(item->item.status==ProjectUpdateStatus.ACCEPTED),
-                    "请先保存已经采纳的书名、简介、补充要求或目标字数修改");
-            require(!accepted.isEmpty()||proposal.automaticExecution,
-                    "请先采纳至少一条明确决定，再执行大纲生成或修订");
+            require(session.projectUpdates.stream().noneMatch(item->item.status==ProjectUpdateStatus.PROPOSED
+                            ||item.status==ProjectUpdateStatus.ACCEPTED),
+                    "请先同意或撤销书名、简介、补充要求或目标字数修改");
             rejectDirectContradictions(accepted);
             ConversationBrief result=new ConversationBrief(); result.sessionId=session.id;
             result.scope=session.scope; result.targetArtifactId=session.targetArtifactId;
             result.baseVersionId=session.baseVersionId; result.baseRevision=session.baseRevision;
             result.acceptedDecisionIds=new ArrayList<>(accepted.stream().map(d->d.id).toList());
             result.acceptedDecisions=new ArrayList<>(accepted.stream().map(d->decisionText(d)).toList());
-            if (proposal.automaticExecution) {
-                result.acceptedDecisionIds.add(proposal.requestedByUserMessageId);
-                result.acceptedDecisions.add("用户本轮明确要求执行："+proposal.instructions);
-            }
+            ConversationMessage requestedBy=message(session,proposal.requestedByUserMessageId);
+            result.acceptedDecisionIds.add(proposal.requestedByUserMessageId);
+            result.acceptedDecisions.add("作者本轮原始要求："+requestedBy.content);
+            if (!proposal.instructions.isBlank())
+                result.acceptedDecisions.add("创作对话整理的本次执行范围："+proposal.instructions);
             result.hash=hash(result); briefs(n).add(result); proposal.conversationBriefId=result.id;
             session.updatedAt=Novel.now(); return result;
         });
@@ -421,24 +469,53 @@ public class ConversationService {
             var root=new LinkedHashMap<String,Object>();
             root.put("scope","OUTLINE"); root.put("baseRevision",session.baseRevision);
             root.put("baseVersionId",session.baseVersionId==null?"":session.baseVersionId);
-            root.put("novel",Map.of("title",novel.title,"synopsis",novel.synopsis,"requirements",novel.requirements,
+            RequirementAuthority.Snapshot requirementSnapshot=requirementAuthority.resolve(novel);
+            root.put("novel",Map.of("title",novel.title,"synopsis",novel.synopsis,"requirements",requirementSnapshot.text(),
                     "targetWords",novel.targetWords));
+            root.put("requirementAuthority",Map.of("strategy",requirementSnapshot.authority(),
+                    "sourceVersionId",requirementSnapshot.sourceVersionId()==null?"":requirementSnapshot.sourceVersionId(),
+                    "rule","当前 requirements 已完成新旧替代，只能按当前有效要求讨论和修改"));
             Artifact outline=currentOutline(novel);
             if (outline!=null&&outline.latest()!=null) {
                 Version version=outline.latest();
-                root.put("currentOutline",Map.of("artifactId",outline.id,"versionId",version.id,
-                        "title",version.title,"content",version.content,"summary",version.summary,
-                        "outlineSpec",version.outlineSpec==null?Map.of():version.outlineSpec));
+                var currentOutline=new LinkedHashMap<String,Object>();
+                currentOutline.put("artifactId",outline.id); currentOutline.put("versionId",version.id);
+                currentOutline.put("title",version.title); currentOutline.put("summary",version.summary);
+                // Structured outlines already contain the full author-visible meaning. Sending both the
+                // structure and its rendered prose doubles large prompts and delays interactive replies.
+                if (version.outlineSpec!=null) currentOutline.put("outlineSpec",version.outlineSpec);
+                else currentOutline.put("content",version.content);
+                root.put("currentOutline",currentOutline);
             }
             root.put("acceptedDecisions",session.decisions.stream().filter(d->d.status==DecisionStatus.ACCEPTED)
                     .map(this::decisionText).toList());
-            int from=Math.max(0,session.messages.size()-20);
-            root.put("recentMessages",session.messages.subList(from,session.messages.size()).stream()
-                    .map(m->Map.of("role",m.role.name(),"content",m.content)).toList());
+            root.put("recentMessages",recentDialogueHistory(session,latestUser));
             root.put("latestUserMessage",latestUser.content);
-            root.put("authorityRule","只有用户逐项采纳的决定才会进入正式任务；本次回复不能修改大纲");
+            root.put("authorityRule","讨论不会修改作品；用户明确要求生成、修改或重写时，应返回 actionProposal，系统据此生成候选版本。候选版本仍需作者统一同意或撤销，不要要求作者逐条采纳创作要求");
             return mapper.writeValueAsString(root);
         } catch (JsonProcessingException e) { throw new Problem(500,"创作对话上下文无法编码"); }
+    }
+
+    private List<Map<String,String>> recentDialogueHistory(ConversationSession session,ConversationMessage latestUser) {
+        final int maxMessages=8,maxCharacters=12000;
+        int latestIndex=session.messages.indexOf(latestUser);
+        if (latestIndex<0) latestIndex=session.messages.size();
+        int remaining=maxCharacters;
+        Deque<Map<String,String>> selected=new ArrayDeque<>();
+        for (int index=latestIndex-1;index>=0&&selected.size()<maxMessages&&remaining>0;index--) {
+            ConversationMessage message=session.messages.get(index);
+            String content=message.content==null?"":message.content;
+            if (content.length()>remaining) {
+                if (remaining<=6) content=content.substring(content.length()-remaining);
+                else {
+                    int keep=remaining-6;
+                    content="[前文省略]"+content.substring(content.length()-keep);
+                }
+            }
+            selected.addFirst(Map.of("role",message.role.name(),"content",content));
+            remaining-=content.length();
+        }
+        return List.copyOf(selected);
     }
 
     private String decisionText(ConversationDecision decision) {
@@ -453,6 +530,10 @@ public class ConversationService {
     }
 
     private ConversationSession rebaseSession(Novel novel,ConversationSession previous) {
+        return rebaseSession(novel,previous,false);
+    }
+
+    private ConversationSession rebaseSession(Novel novel,ConversationSession previous,boolean carryDraftProposal) {
         ConversationSession rebased=new ConversationSession(); rebased.scope=previous.scope;
         rebased.threadId=previous.threadId; rebased.threadTitle=previous.threadTitle;
         rebased.previousSessionId=previous.id;
@@ -460,22 +541,28 @@ public class ConversationService {
         rebased.targetArtifactId=outline==null?null:outline.id;
         rebased.baseVersionId=outline==null||outline.latest()==null?null:outline.latest().id;
         int from=Math.max(0,previous.messages.size()-20);
+        Map<String,String> messageIds=new HashMap<>();
         for (ConversationMessage source:previous.messages.subList(from,previous.messages.size())) {
             ConversationMessage copy=new ConversationMessage(); copy.role=source.role; copy.content=source.content;
-            rebased.messages.add(copy);
+            rebased.messages.add(copy); messageIds.put(source.id,copy.id);
         }
         for (ConversationDecision source:previous.decisions.stream().filter(d->d.status==DecisionStatus.ACCEPTED).toList()) {
-            ConversationDecision copy=new ConversationDecision(); copy.sourceMessageId=source.sourceMessageId;
+            ConversationDecision copy=new ConversationDecision(); copy.sourceMessageId=messageIds.get(source.sourceMessageId);
             copy.type=source.type; copy.status=DecisionStatus.ACCEPTED; copy.text=source.text; copy.decidedAt=Novel.now();
             rebased.decisions.add(copy);
         }
-        for (ActionProposal source:previous.proposals.stream().filter(p->p.status==ProposalStatus.EXECUTED).toList()) {
-            ActionProposal copy=new ActionProposal(); copy.sourceMessageId=source.sourceMessageId;
+        for (ActionProposal source:previous.proposals.stream()
+                .filter(p->p.status==ProposalStatus.EXECUTED || carryDraftProposal&&p.status==ProposalStatus.DRAFT).toList()) {
+            ActionProposal copy=new ActionProposal(); copy.sourceMessageId=messageIds.get(source.sourceMessageId);
             copy.operation=source.operation; copy.instructions=source.instructions;
-            copy.baseRevision=source.baseRevision; copy.baseVersionId=source.baseVersionId;
-            copy.status=source.status; copy.conversationBriefId=source.conversationBriefId; copy.taskId=source.taskId;
-            copy.automaticExecution=source.automaticExecution; copy.requestedByUserMessageId=source.requestedByUserMessageId;
-            copy.executionError=source.executionError; copy.executedAt=source.executedAt;
+            boolean deferred=source.status==ProposalStatus.DRAFT;
+            copy.baseRevision=deferred?rebased.baseRevision:source.baseRevision;
+            copy.baseVersionId=deferred?rebased.baseVersionId:source.baseVersionId;
+            copy.status=source.status; copy.conversationBriefId=deferred?null:source.conversationBriefId;
+            copy.taskId=deferred?null:source.taskId;
+            copy.automaticExecution=deferred||source.automaticExecution;
+            copy.requestedByUserMessageId=messageIds.get(source.requestedByUserMessageId);
+            copy.executionError=deferred?null:source.executionError; copy.executedAt=deferred?null:source.executedAt;
             rebased.proposals.add(copy);
         }
         ConversationMessage notice=new ConversationMessage(); notice.role=ConversationRole.ASSISTANT;
@@ -533,10 +620,39 @@ public class ConversationService {
     private boolean immediateOutlineExecutionRequested(String text) {
         String value=text==null?"":text.replaceAll("\\s+","");
         if (value.isBlank()||value.matches(".*(不要|不需要|先别|暂不|别急着)(生成|写|修改|重写).*")) return false;
-        if (value.endsWith("吗")||value.endsWith("呢")||value.contains("能不能")||value.contains("是否可以")) return false;
-        return value.matches(".*(生成|开始写|直接写|重写|按.+修改|开始修改).*(大纲|全书规划).*" )
+        if (value.endsWith("吗")||value.endsWith("呢")||value.endsWith("？")||value.endsWith("?")
+                ||value.contains("能不能")||value.contains("是否可以")||value.contains("好不好")
+                ||value.contains("怎么样")||value.contains("怎么改")||value.contains("如何改")) return false;
+        return value.matches(".*(生成|开始写|直接写|重写|改写|开始修改|直接修改|帮我修改|帮我改|按.+修改|照.+修改|把.+改成).*(大纲|全书规划).*" )
                 ||value.matches("^(生成|开始生成|直接生成|生成吧)[！。]?")
-                ||value.matches(".*(按这个来|按刚才.+来|就这样|开始吧|动手吧)[！。]?");
+                ||value.matches("^(请|请你|麻烦|麻烦你)?(帮我)?(现在)?(修改|调整|重写|改写|完善|补充|删除|压缩).+")
+                ||value.matches(".*(按这个来|按刚才.+来|就这样改|开始吧|动手吧)[！。]?")
+                ||value.matches(".*(把|将).+(改成|改为|删掉|删除|补上|加入|增加|调整).*");
+    }
+
+    /**
+     * A model may mistake story instructions for project metadata. Project fields are therefore
+     * writable only when the author's current message names that field and asks to change it.
+     */
+    private boolean explicitProjectFieldChangeRequested(String text,String candidateField) {
+        if (text==null||text.isBlank()||candidateField==null) return false;
+        ProjectField field;
+        try { field=ProjectField.valueOf(candidateField); }
+        catch (RuntimeException ignored) { return false; }
+        String value=text.replaceAll("\\s+","");
+        String fieldTerm=switch (field) {
+            case TITLE -> "(?:书名|小说名|作品名|作品标题)";
+            case SYNOPSIS -> "(?:作品简介|小说简介|故事简介|简介)";
+            case REQUIREMENTS -> "(?:补充要求|创作要求|写作要求|项目要求|要求栏|要求字段)";
+            case TARGET_WORDS -> "(?:目标字数|字数上限|总字数|篇幅设置)";
+        };
+        String change="(?:改|修改|更改|调整|更新|替换|换成|改成|改为|设为|设置|补充|增加|添加|删掉|删除|重写)";
+        String negative="(?:不要|别|无需|不需要|不必|保持|保留|维持)";
+        if (value.matches(".*"+negative+".{0,8}"+fieldTerm+".*")
+                ||value.matches(".*"+fieldTerm+".{0,8}(?:不要改|别改|无需修改|不需要修改|不必修改|保持不变|不要变化).*"))
+            return false;
+        return value.matches(".*"+change+".{0,16}"+fieldTerm+".*")
+                ||value.matches(".*"+fieldTerm+".{0,16}"+change+".*");
     }
 
     private String hash(ConversationBrief brief) {

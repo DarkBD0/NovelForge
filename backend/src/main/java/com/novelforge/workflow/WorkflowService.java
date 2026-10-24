@@ -5,11 +5,13 @@ import com.novelforge.novel.Novel;
 import com.novelforge.novel.Novel.*;
 import com.novelforge.novel.WordCounter;
 import com.novelforge.generation.ModelGateway;
+import com.novelforge.generation.PlanNarrativeRenderer;
 import com.novelforge.generation.StateExtractionPolicy;
 import com.novelforge.outline.OutlineSpec;
 import com.novelforge.outline.OutlineStructureService;
 import com.novelforge.revision.ImpactAnalyzer;
 import org.springframework.stereotype.Service;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import static com.novelforge.shared.Problem.require;
@@ -63,7 +65,11 @@ public class WorkflowService {
                 long projected = counter.approvedWords(n) - (a.approved() == null ? 0 : counter.count(a.approved().content)) + counter.count(v.content);
                 require(projected <= n.approvedMaxWords, "确认后将超过已批准字数上限，请先修订正文或批准扩充预算");
             }
-            a.approvedVersionId=v.id; a.needsRevision=false; n.revision++;
+            boolean replacesApproved=a.approvedVersionId!=null&&!a.approvedVersionId.equals(v.id);
+            a.approvedVersionId=v.id; a.needsRevision=false;
+            if (replacesApproved)
+                impact.invalidateFollowing(n,a,impactReason(v));
+            n.revision++;
             n.approvals.add(new Approval(a.id, v.id, n.revision, overrideReason, Novel.now()));
             return n;
         });
@@ -75,12 +81,37 @@ public class WorkflowService {
             Version latest=artifact.latest();
             require(latest!=null && latest.id.equals(versionId),"只能放弃当前最新候选版本");
             require(!versionId.equals(artifact.approvedVersionId),"已确认版本不能放弃");
-            int sourceIndex=n.artifacts.indexOf(artifact);
-            require(n.artifacts.subList(sourceIndex+1,n.artifacts.size()).stream().noneMatch(item->item.needsRevision),
-                    "这次修改已经影响后续内容，暂不能一键放弃；请先处理关联版本或通过历史版本重新建立草稿");
             latest.dismissed=true; latest.dismissedAt=Novel.now();
             artifact.needsRevision=latest.previousNeedsRevision;
             n.revision++;
+            return n;
+        });
+    }
+
+    /** Starts an explicit history rewrite without deleting any approved version. */
+    public Novel beginChapterRewrite(String id,int chapterNumber,String instructions,long revision) {
+        return repository.update(id,n->{
+            expected(n,revision); idle(n);
+            require(rules.pending(n)==null,"请先处理当前待确认或待修订内容");
+            require(chapterNumber>0,"起始章节必须大于零");
+            require(instructions!=null&&!instructions.isBlank(),"请说明这次重新创作的目标");
+            Artifact chapter=n.artifacts.stream().filter(a->a.kind==Kind.CHAPTER&&a.chapterNumber==chapterNumber&&a.clean())
+                    .findFirst().orElseThrow(()->new com.novelforge.shared.Problem(409,"只能从已确认章节开始重新创作"));
+            Artifact sourcePlan=n.artifacts.stream().filter(a->a.kind==Kind.PLAN&&a.clean()&&a.approved().plan.startChapter<=chapterNumber
+                            &&a.approved().plan.endChapter>=chapterNumber)
+                    .findFirst().orElseThrow(()->new com.novelforge.shared.Problem(409,"当前章节没有可修订的已确认规划"));
+
+            LinkedHashSet<String> affected=new LinkedHashSet<>();
+            for(Artifact artifact:n.artifacts) {
+                boolean plan=artifact.kind==Kind.PLAN&&artifact.batchNumber>=sourcePlan.batchNumber&&artifact.approvedVersionId!=null;
+                boolean written=artifact.kind==Kind.CHAPTER&&artifact.chapterNumber>=chapterNumber&&artifact.approvedVersionId!=null;
+                if(plan||written) { artifact.needsRevision=true; affected.add(artifact.id); }
+            }
+            require(affected.contains(chapter.id)&&affected.contains(sourcePlan.id),"无法建立章节重写范围");
+            Change change=new Change(); change.sourceArtifactId=sourcePlan.id;
+            change.reason="从第"+chapterNumber+"章重新创作："+instructions.strip();
+            change.affectedArtifactIds.addAll(affected); n.changes.add(change);
+            n.status="WRITING"; n.revision++;
             return n;
         });
     }
@@ -93,17 +124,36 @@ public class WorkflowService {
             if (a.kind==Kind.OUTLINE && a.latest().outlineSpec!=null)
                 require(java.util.Objects.equals(a.latest().content,edit.content()),
                         "结构化大纲暂不能直接修改展示正文；请把修改要求交给大纲 Agent，以同步更新结构和作者可读版本");
-            require(impact.changed(a.latest(),edit.title(),edit.content(),edit.summary(),edit.facts(),edit.plan()),
+            String content=a.kind==Kind.PLAN&&edit.plan()!=null?PlanNarrativeRenderer.render(edit.plan()):edit.content();
+            String summary=a.kind==Kind.PLAN&&edit.plan()!=null?PlanNarrativeRenderer.summary(edit.plan()):edit.summary();
+            require(impact.changed(a.latest(),edit.title(),content,summary,edit.facts(),edit.plan()),
                     "内容没有发生变化，无需创建新版本或重新检查");
-            Version v = new Version(); v.baseVersionId=a.latest().id; v.title=edit.title(); v.content=edit.content();
-            v.summary=edit.summary(); v.facts=edit.facts(); v.plan=edit.plan(); v.source="USER"; v.basedOnRevision=n.revision;
+            Version v = new Version(); v.baseVersionId=a.latest().id; v.title=edit.title(); v.content=content;
+            v.summary=summary; v.facts=edit.facts(); v.plan=edit.plan(); v.source="USER"; v.basedOnRevision=n.revision;
+            v.pendingImpactReason=edit.reason();
             if(a.kind==Kind.CHAPTER) {
                 v.facts=List.of();
                 v.stateExtractionRequired=true; v.stateExtractionStatus=StateExtractionStatus.PENDING;
+                Version base=a.latest();
+                if(Objects.equals(base.content,v.content) && stateExtractions.current(base)) {
+                    v.facts=List.copyOf(base.facts);
+                    v.stateExtractionStatus=StateExtractionStatus.SUCCEEDED;
+                    v.stateExtractionPolicyVersion=base.stateExtractionPolicyVersion;
+                    v.stateExtractionSourceHash=base.stateExtractionSourceHash;
+                    v.stateExtractionAgentRunId=base.stateExtractionAgentRunId;
+                    v.stateExtractionError=base.stateExtractionError;
+                    v.stateEvidence=List.copyOf(base.stateEvidence);
+                    v.stateEntities=List.copyOf(base.stateEntities);
+                    v.stateRelations=List.copyOf(base.stateRelations);
+                }
+                if(Objects.equals(base.content,v.content)) {
+                    v.styleReview=base.styleReview;
+                    v.styleReviewPolicyVersion=base.styleReviewPolicyVersion;
+                    v.stylePolishRound=base.stylePolishRound;
+                }
             }
             v.outlineSpec=a.latest().outlineSpec; v.outlineSpecHash=a.latest().outlineSpecHash;
             rules.validateVersion(n, a, v);
-            impact.invalidateFollowing(n, a, edit.reason());
             a.versions.add(v); a.needsRevision=false; n.revision++;
             return n;
         });
@@ -122,7 +172,7 @@ public class WorkflowService {
             String rendered=outlineStructures.render(edit.outlineSpec());
             String hash=outlineStructures.hash(edit.outlineSpec());
             require(!Objects.equals(base.title,edit.title()) || !Objects.equals(base.summary,edit.summary())
-                            || !Objects.equals(base.outlineSpecHash,hash),
+                            || !Objects.equals(base.content,rendered),
                     "大纲没有发生变化，无需创建新版本或重新检查");
 
             Version version=new Version();
@@ -130,6 +180,7 @@ public class WorkflowService {
             version.summary=edit.summary(); version.facts=base.facts==null?List.of():List.copyOf(base.facts);
             version.plan=base.plan; version.outlineSpec=edit.outlineSpec(); version.outlineSpecHash=hash;
             version.source="USER"; version.basedOnRevision=n.revision;
+            version.pendingImpactReason=edit.reason();
             rules.validateVersion(n,artifact,version);
             ModelGateway.Generated candidate=new ModelGateway.Generated(version.title,version.content,version.summary,
                     version.facts,version.plan,version.outlineSpec,List.of());
@@ -137,10 +188,15 @@ public class WorkflowService {
             version.reviewRevision=n.revision+1;
             version.reviewPolicyVersion=OutlineStructureService.VERSION;
 
-            impact.invalidateFollowing(n,artifact,edit.reason());
             artifact.versions.add(version); artifact.needsRevision=false; n.revision++;
             return n;
         });
+    }
+
+    private String impactReason(Version version) {
+        return version.pendingImpactReason==null||version.pendingImpactReason.isBlank()
+                ?"已确认上游内容修订，需要同步复核后续内容"
+                :version.pendingImpactReason;
     }
     public Novel budget(String id, Long requestedTarget, long max, String reason, long revision) {
         return repository.update(id, n -> {

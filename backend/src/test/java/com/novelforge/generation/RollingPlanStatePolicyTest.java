@@ -51,6 +51,19 @@ class RollingPlanStatePolicyTest {
         assertThat(result.passed()).isTrue();
     }
 
+    @Test void confirmedOutlineChangeAutomaticallyPermitsAffectedPlanRebuild() {
+        Novel novel=novelWithConfirmedChapter();
+        Artifact outline=new Artifact(); outline.kind=Kind.OUTLINE; novel.artifacts.add(0,outline);
+        Artifact target=affectedPlan(plan("原承接","原假设","取得钥匙","打开暗门")); novel.artifacts.add(target);
+        Change change=new Change(); change.sourceArtifactId=outline.id; change.affectedArtifactIds.add(target.id);
+        novel.changes.add(change);
+        Plan rewritten=plan("新承接","新假设","转向新大纲","完成新主线");
+
+        Review result=policy.apply(novel,target,Action.REWRITE,"按新大纲修订规划",generated(rewritten),cleanReview());
+
+        assertThat(result.passed()).isTrue();
+    }
+
     private Novel novelWithConfirmedChapter() {
         Novel novel=new Novel(); Artifact chapter=new Artifact(); chapter.kind=Kind.CHAPTER; chapter.chapterNumber=1;
         Version version=new Version(); version.title="第一章"; version.content="正文"; version.summary="已发生事实";

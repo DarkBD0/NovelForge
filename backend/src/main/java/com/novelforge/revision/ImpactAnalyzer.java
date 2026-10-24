@@ -56,6 +56,8 @@ public class ImpactAnalyzer {
         List<String> affectedArtifacts=new ArrayList<>();
         for (int i = start + 1; i < order.size(); i++) {
             Artifact a = order.get(i);
+            // A revised future plan must adapt to confirmed history, never invalidate history retroactively.
+            if(source.kind==Kind.PLAN && a.kind==Kind.CHAPTER && a.clean()) continue;
             Version basis=a.approved()!=null?a.approved():a.latest();
             boolean legacy=basis==null || basis.sourceVersionIds==null || basis.sourceVersionIds.isEmpty();
             boolean depends=forcedArtifacts.contains(a.id) || legacy || basis.sourceVersionIds.stream().anyMatch(affectedVersions::contains);

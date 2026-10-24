@@ -1,0 +1,12 @@
+.rewrite-impact {
+  margin-bottom: 18px;
+  padding: 14px 16px;
+  border: 1px solid #d2dcd1;
+  border-radius: 8px;
+  background: #edf1e9;
+  font-size: 13px;
+  line-height: 1.8;
+}
+.rewrite-impact strong { display: block; margin-bottom: 5px; }
+.rewrite-impact ul { margin: 6px 0 0; padding-left: 20px; }
+.rewrite-from-button { border-color: #d4b77c; color: #7a5520; background: #fffaf0; }

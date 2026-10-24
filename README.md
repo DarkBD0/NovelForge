@@ -180,7 +180,7 @@ Copy-Item .\config\model.local.example.env .\config\model.local.env
 NOVELFORGE_MODEL_MODE=http
 NOVELFORGE_MODEL_BASE_URL=https://api.deepseek.com
 NOVELFORGE_MODEL_API_KEY=replace-with-your-private-key
-NOVELFORGE_MODEL_NAME=deepseek-v4-flash
+NOVELFORGE_MODEL_NAME=deepseek-flash
 ```
 
 然后启动真实模型模式：
@@ -231,7 +231,7 @@ Copy-Item .\config\auxiliary.local.example.env .\config\auxiliary.local.env
 | `NOVELFORGE_MODEL_MODE` | `demo` / `http` | 离线演示或真实接口 |
 | `NOVELFORGE_MODEL_BASE_URL` | `https://api.deepseek.com` | 基础地址，程序追加 `/chat/completions` |
 | `NOVELFORGE_MODEL_API_KEY` | 无 | 私有密钥；本机无鉴权模型可以留空 |
-| `NOVELFORGE_MODEL_NAME` | `deepseek-v4-flash` | 供应商实际模型 ID，不是网页展示名称 |
+| `NOVELFORGE_MODEL_NAME` | `deepseek-flash` | 供应商实际模型 ID，不是网页展示名称；旧名 `deepseek-v4-flash` 仍兼容但不再推荐 |
 | `NOVELFORGE_MODEL_TIMEOUT` | `180` | 单次模型请求超时秒数 |
 | `NOVELFORGE_MAX_OUTPUT_TOKENS` | `12000` | 单次请求输出额度 |
 | `NOVELFORGE_MAX_CONTEXT_CHARS` | `160000` | 本地上下文字符安全阈值，不等于 token 数 |

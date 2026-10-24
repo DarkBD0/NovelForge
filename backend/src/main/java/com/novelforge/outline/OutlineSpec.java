@@ -7,6 +7,11 @@ import java.util.List;
 public class OutlineSpec {
     public String schemaVersion="1";
     public String storyCore;
+    /** The repeatable reader-facing hook; called “核心吸引点” in the author UI. */
+    public String readerAttraction;
+    /** For payoff-driven genres, the first concrete advantage realized in the opening event. */
+    public String openingPayoff;
+    public String openingPayoffEventId;
     public String genreTone;
     public String protagonistGoal;
     public String coreConflict;
@@ -44,6 +49,8 @@ public class OutlineSpec {
     public static class CharacterArc {
         public String id;
         public String name;
+        /** PROTAGONIST, CORE_SUPPORT or FUNCTIONAL_NPC. */
+        public String roleTier;
         public String goal;
         public String motivation;
         public String flaw;
@@ -67,6 +74,11 @@ public class OutlineSpec {
         public String id;
         public String title;
         public String goal;
+        public String readerPayoff;
+        /** The concrete opposition, consequential choice and cost driving this stage. */
+        public String dramaticTurn;
+        public String payoffResult;
+        public String escalation;
         public List<String> prerequisiteIds=new ArrayList<>();
         public int estimatedWords;
         public List<KeyEvent> events=new ArrayList<>();

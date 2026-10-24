@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.novelforge.generation.ModelGateway;
 import com.novelforge.generation.ModelGateway.Generated;
+import com.novelforge.generation.ReviewPolicy;
 import com.novelforge.infrastructure.NovelRepository;
 import com.novelforge.novel.Novel;
 import com.novelforge.novel.Novel.*;
@@ -25,7 +26,10 @@ import org.springframework.test.web.servlet.MockMvc;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.LinkedHashMap;
@@ -138,9 +142,11 @@ class HttpRewriteIntegrationTest {
         assertThat(outline.latest().content).contains("修订后主线、人物动机与明确结局");
         assertThat(outline.latest().outlineSpecHash).hasSize(64);
         assertThat(outline.clean()).isFalse();
-        assertThat(after.artifacts.getLast().needsRevision).isTrue();
+        assertThat(after.artifacts.getLast().needsRevision).isFalse();
         workflow.confirm(after.id,outline.id,outline.latest().id,after.revision,null);
-        assertThat(repository.get(after.id).artifacts.getFirst().clean()).isTrue();
+        Novel confirmed=repository.get(after.id);
+        assertThat(confirmed.artifacts.getFirst().clean()).isTrue();
+        assertThat(confirmed.artifacts.getLast().needsRevision).isTrue();
     }
     @Test void structuredOutlineEditEndpointSavesRenderedCandidateBeforeAnyPaidReview() throws Exception {
         Novel before=seed(); Artifact outline=before.artifacts.getFirst();
@@ -165,7 +171,7 @@ class HttpRewriteIntegrationTest {
         assertThat(candidate.outlineSpecHash).isEqualTo(outlineStructure.hash(spec));
         assertThat(candidate.review.passed()).isTrue();
         assertThat(candidate.reviewPolicyVersion).isEqualTo(OutlineStructureService.VERSION);
-        assertThat(saved.artifacts.getLast().needsRevision).isTrue();
+        assertThat(saved.artifacts.getLast().needsRevision).isFalse();
         assertThat(requests).isEmpty();
     }
     @Test void plainTextRewriteFailsWithoutChangingVersionsOrDownstreamOrRetrying() throws Exception {
@@ -190,6 +196,47 @@ class HttpRewriteIntegrationTest {
         assertThat(task.error).contains("没有产生实际修改");
         assertUnchanged(before);assertThat(requests).hasSize(1);
     }
+    @Test void outlineRewriteCannotPassByChangingOnlySummary() throws Exception {
+        Novel before=seed();
+        reply(JSON.writeValueAsString(OutlineTestFixtures.generated(1000,"原有主线和明确结局","只改了摘要措辞")));
+
+        Task task=rewrite(before);
+
+        assertThat(task.status).isEqualTo(TaskStatus.FAILED);
+        assertThat(task.error).contains("没有产生实际修改","大纲结构保持不变");
+        assertUnchanged(before); assertThat(requests).hasSize(1);
+    }
+    @Test void conversationOutlineRewriteSendsAcceptedBriefToStoryArchitect() throws Exception {
+        Novel before=seed(); Artifact outline=before.artifacts.getFirst();
+        ConversationBrief brief=new ConversationBrief(); brief.sessionId=Novel.uid();
+        brief.scope=ConversationScope.OUTLINE; brief.targetArtifactId=outline.id;
+        brief.baseVersionId=outline.latest().id; brief.baseRevision=before.revision;
+        brief.acceptedDecisionIds=List.of("author-message");
+        brief.acceptedDecisions=List.of("作者本轮原始要求：不解释重生原因，也不公开信息");
+        brief.hash=briefHash(brief);
+        repository.update(before.id,n->{n.conversationBriefs.add(brief);return null;});
+        candidate();
+        reply(JSON.writeValueAsString(new Review(true,List.of(),false,false,false)));
+        reply(JSON.writeValueAsString(new Review(true,List.of(),true,true,true)));
+
+        Task started=tasks.submitConversation(before.id,Action.REWRITE,outline.id,brief,Novel.uid(),before.revision);
+        await().atMost(Duration.ofSeconds(10)).until(()->{
+            TaskStatus status=tasks.find(repository.get(before.id),started.id).status;
+            return status!=TaskStatus.RUNNING&&status!=TaskStatus.QUEUED;
+        });
+
+        Task finished=tasks.find(repository.get(before.id),started.id);
+        assertThat(finished.status).as(finished.error).isEqualTo(TaskStatus.SUCCEEDED);
+        assertThat(requests).hasSize(3);
+        List<String> roles=new ArrayList<>();
+        for (JsonNode request:requests) {
+            JsonNode input=JSON.readTree(request.path("messages").get(1).path("content").asText());
+            assertThat(input.path("context").path("conversationBrief").path("acceptedDecisions").toString())
+                    .contains("不解释重生原因","不公开信息");
+            roles.add(input.path("context").path("agentContext").path("role").asText());
+        }
+        assertThat(roles).containsExactly("STORY_ARCHITECT","CONTINUITY_AUDITOR","PLOT_FORESHADOW_AUDITOR");
+    }
     @Test void characterRewriteThatStillContainsStoryOrderFailsWithReadableLocationAndKeepsOriginal() throws Exception {
         Novel before=seed();
         before=repository.update(before.id,n->{
@@ -209,6 +256,12 @@ class HttpRewriteIntegrationTest {
                 "剧情顺序词“初次”","本次修订未保存").doesNotContain("character_wang_ayi");
         assertUnchanged(before);
         assertThat(requests).hasSize(1);
+    }
+
+    private static String briefHash(ConversationBrief brief) throws Exception {
+        String value=brief.sessionId+"|"+brief.scope+"|"+brief.targetArtifactId+"|"+brief.baseVersionId+"|"
+                +brief.baseRevision+"|"+String.join("|",brief.acceptedDecisionIds)+"|"+String.join("|",brief.acceptedDecisions);
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
     }
     void assertUnchanged(Novel before) throws Exception {
         Novel after=repository.get(before.id);
@@ -301,8 +354,11 @@ class HttpRewriteIntegrationTest {
             reply(JSON.writeValueAsString(generated(action)));
             reply(JSON.writeValueAsString(new Review(true,List.of(),false,false,false)));
             if (action==Action.OUTLINE) reply(JSON.writeValueAsString(new Review(true,List.of(),true,true,true)));
+            if (action==Action.PLAN) reply(JSON.writeValueAsString(Map.of("findings",List.of())));
             if (action==Action.CHAPTER) reply(JSON.writeValueAsString(new ModelGateway.StateExtraction(List.of(
                     new ModelGateway.ExtractedState("event_final","EVENT","本章进入结局","ACTIVE",
+                            List.of("终终终终终终终终终终")),
+                    new ModelGateway.ExtractedState("foreshadow_stale","FORESHADOW","旧状态仍标记待续","OPEN",
                             List.of("终终终终终终终终终终"))))));
             Task result=submit(n,action,null,"");
             assertThat(result.status).as(result.error).isEqualTo(TaskStatus.SUCCEEDED);
@@ -323,7 +379,79 @@ class HttpRewriteIntegrationTest {
         assertThat(input.path("candidate").isNull()).isTrue();
         Novel checked=repository.get(n.id);
         assertThat(checked.status).isEqualTo("WRITING");
+        // An OPEN extraction label alone must not overrule a completion review that
+        // reconciled the later confirmed story and passed all three outcome checks.
+        assertThat(checked.completionChecks.getLast().review().foreshadowingResolved()).isTrue();
         assertThat(workflow.finish(n.id,checked.completionChecks.getLast().id(),checked.revision,true).status).isEqualTo("COMPLETED");
-        assertThat(requests).hasSize(12);
+        assertThat(requests).hasSize(13); // includes the focused chapter-plan causal audit
+    }
+
+    @Test void planAuditKeepsOneActionableIssueForRepeatedRootCauseThroughTaskAndDatabase() throws Exception {
+        Novel n=seedFor(Action.PLAN);
+        Plan plan=new Plan(); plan.startChapter=1; plan.endChapter=2;
+        plan.prepareNextAfterChapter=1; plan.finalBatch=true;
+        plan.triggerReason="两章内收束"; plan.handoff="解决主线并结束故事"; plan.assumptions="";
+        plan.chapters=List.of(
+                new ChapterBeat(1,"旧照","照片肯定拍在火灾前",null,
+                        List.of("她断定旧照片拍于火灾之前"),"",""),
+                new ChapterBeat(2,"火灾","她第一次得知楼里曾发生火灾"));
+        reply(JSON.writeValueAsString(new Generated("规划","候选规划","测试摘要",List.of(),plan)));
+        reply(JSON.writeValueAsString(new Review(true,List.of(),false,false,false)));
+        reply(JSON.writeValueAsString(Map.of("findings",List.of(
+                Map.of("location","第一章","problem","过早知道火灾","candidateQuote","照片肯定拍在火灾前",
+                        "basisQuote","她第一次得知楼里曾发生火灾","suggestion","先建立信息来源","severity","必须修正"),
+                Map.of("location","第一章场景","problem","同一问题的另一种写法","candidateQuote","她断定旧照片拍于火灾之前",
+                        "basisQuote","照片肯定拍在火灾前","suggestion","保留不确定性","severity","必须修正")))));
+
+        Task task=submit(n,Action.PLAN,null,"");
+
+        assertThat(task.status).as(task.error).isEqualTo(TaskStatus.SUCCEEDED);
+        assertThat(requests).hasSize(3);
+        Novel after=repository.get(n.id);
+        Artifact candidate=after.artifacts.getLast();
+        assertThat(candidate.kind).isEqualTo(Kind.PLAN);
+        assertThat(candidate.latest().review.issueDetails()).hasSize(1);
+        assertThat(candidate.latest().review.passed()).isFalse();
+        assertThat(candidate.approvedVersionId).isNull();
+        assertThatThrownBy(()->workflow.confirm(after.id,candidate.id,candidate.latest().id,after.revision,null))
+                .hasMessageContaining("检查");
+    }
+
+    @Test void inaccurateNonblankSummaryCanBeCorrectedWithoutRewritingProse() throws Exception {
+        Novel seed=seed();
+        Novel pending=repository.update(seed.id,current->{
+            Artifact characters=current.artifacts.getLast();
+            Version base=characters.latest();
+            Version draft=new Version(); draft.title=base.title; draft.content=base.content;
+            draft.summary="错误摘要：正文中没有发生的决定";
+            draft.facts=List.copyOf(base.facts);
+            ReviewIssue issue=new ReviewIssue("当前内容 > 内容摘要","摘要多写了正文没有发生的决定",
+                    "当前摘要与正文不符","只删改摘要，不向正文补写解释","必须修正");
+            draft.review=new Review(false,List.of(issue.text()),false,false,false,List.of(issue));
+            characters.versions.add(draft);
+            current.revision++;
+            draft.reviewRevision=current.revision;
+            draft.reviewPolicyVersion=ReviewPolicy.VERSION;
+            return current;
+        });
+        Artifact characters=pending.artifacts.getLast();
+        String originalBody=characters.latest().content;
+        reply("{\"operations\":[{\"op\":\"SET_FIELD\",\"field\":\"summary\",\"value\":\"只概括正文已有的人物设定\"}]}");
+        reply(JSON.writeValueAsString(new Review(true,List.of(),false,false,false)));
+
+        Task task=tasks.submitSummary(pending.id,characters.id,Novel.uid(),pending.revision);
+        await().atMost(Duration.ofSeconds(10)).until(()->{
+            TaskStatus status=tasks.find(repository.get(pending.id),task.id).status;
+            return status!=TaskStatus.QUEUED && status!=TaskStatus.RUNNING;
+        });
+
+        Novel saved=repository.get(pending.id);
+        Artifact repaired=saved.artifacts.getLast();
+        assertThat(tasks.find(saved,task.id).status).as(tasks.find(saved,task.id).error).isEqualTo(TaskStatus.SUCCEEDED);
+        assertThat(repaired.latest().content).isEqualTo(originalBody);
+        assertThat(repaired.latest().summary).isEqualTo("只概括正文已有的人物设定");
+        assertThat(repaired.latest().review.passed()).isTrue();
+        assertThat(repaired.latest().id).isNotEqualTo(characters.latest().id);
+        assertThat(requests).hasSize(2);
     }
 }

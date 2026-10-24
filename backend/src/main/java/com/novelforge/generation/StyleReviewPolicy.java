@@ -14,7 +14,7 @@ import java.util.regex.Pattern;
 /** Keeps prose advice non-blocking and adds safe, explainable local checks. */
 @Component
 public class StyleReviewPolicy {
-    public static final String VERSION="2026-09-27-v4";
+    public static final String VERSION="2026-10-24-v6";
 
     private static final Pattern QUOTED_EVIDENCE=Pattern.compile(
             "原文\\s*[：:]\\s*[“\"]([\\s\\S]+?)[”\"]");
