@@ -23,6 +23,7 @@ public class AgentContextPolicy {
         CURRENT_PLAN,
         PLAN_COMPARISON,
         PLAN_STORY_ENGINE,
+        ENDING_GOALS,
         CHAPTER_BRIEF,
         CONFIRMED_DESIGN,
         HISTORICAL_SUMMARIES,
@@ -79,7 +80,7 @@ public class AgentContextPolicy {
                     Section.KNOWN_IDENTITIES,Section.CURRENT_PLAN,Section.CHAPTER_BRIEF,Section.CONFIRMED_DESIGN,
                     Section.HISTORICAL_SUMMARIES);
             case COMPLETION_AUDITOR -> access(2,Section.PROJECT_BRIEF,Section.STATE_MODEL,Section.WORD_BUDGET,
-                    Section.FORMAL_CANON,Section.CONFIRMED_DESIGN,Section.HISTORICAL_SUMMARIES,
+                    Section.FORMAL_CANON,Section.ENDING_GOALS,Section.CONFIRMED_DESIGN,Section.HISTORICAL_SUMMARIES,
                     Section.RECENT_CHAPTER_TEXT,Section.RETRIEVED_HISTORY);
         };
     }

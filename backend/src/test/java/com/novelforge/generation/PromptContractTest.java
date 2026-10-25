@@ -354,7 +354,7 @@ class PromptContractTest {
                 .contains("进入下一轮")
                 .contains("对手如何获知诱饵")
                 .contains("不可转移、无例外")
-                .contains("outlineSpec 使用 schemaVersion=\"3\"")
+                .contains("outlineSpec 使用 schemaVersion=\"4\"")
                 .doesNotContain("CHAPTER 文风规则");
     }
 

@@ -101,8 +101,8 @@ public class TaskService {
                 .anyMatch(issue->"必须修正".equals(issue.severity()) && issue.location().contains("摘要"));
         require(missing || reviewFoundSummaryIssue,"当前版本不需要补充或修正摘要");
         String instructions=missing
-                ?"只补充当前内容摘要，不修改标题、正文、档案增量或章节规划。摘要必须准确概括现有内容，供后续连续创作使用。"
-                :"只修正当前内容摘要中与正文不一致的表述，不修改标题、正文、档案增量或章节规划。删除正文没有发生的推断、决定和行动，不为保留旧摘要向正文补写解释。";
+                ?"只补充当前内容摘要，正文保持不变，不修改标题、档案增量或章节规划。摘要必须准确概括现有内容，供后续连续创作使用。"
+                :"只修正当前内容摘要中与正文不一致的表述，正文保持不变，不修改标题、档案增量或章节规划。删除正文没有发生的推断、决定和行动，不为保留旧摘要向正文补写解释。";
         return submit(id,Action.REWRITE,artifactId,instructions,key,revision,true);
     }
     public Task submitContentFix(String id,String artifactId,String key,long revision) {

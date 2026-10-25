@@ -25,6 +25,7 @@ public class ReviewAggregator {
     private final WordCounter words;
     private final ExplicitWordLimit explicitWordLimit;
     private final OutlineBudgetAudit outlineBudget;
+    private final PlanWordBudgetAudit planWordBudget;
     private final FactAtomicityPolicy factAtomicity;
     private final ProseBoundaryPolicy proseBoundary;
     private final RollingPlanStatePolicy rollingPlanState;
@@ -36,7 +37,8 @@ public class ReviewAggregator {
     private final ExplicitRevealBoundaryPolicy explicitRevealBoundaryPolicy;
 
     public ReviewAggregator(WordCounter words, ExplicitWordLimit explicitWordLimit,
-                            OutlineBudgetAudit outlineBudget, FactAtomicityPolicy factAtomicity,
+                            OutlineBudgetAudit outlineBudget, PlanWordBudgetAudit planWordBudget,
+                            FactAtomicityPolicy factAtomicity,
                             ProseBoundaryPolicy proseBoundary,
                             RollingPlanStatePolicy rollingPlanState,
                             ReviewConvergence convergence,
@@ -45,6 +47,7 @@ public class ReviewAggregator {
                             PlanBeatRepetitionPolicy planBeatRepetitionPolicy,
                             ExplicitRevealBoundaryPolicy explicitRevealBoundaryPolicy) {
         this.words=words; this.explicitWordLimit=explicitWordLimit; this.outlineBudget=outlineBudget;
+        this.planWordBudget=planWordBudget;
         this.factAtomicity=factAtomicity; this.proseBoundary=proseBoundary;
         this.rollingPlanState=rollingPlanState; this.convergence=convergence; this.reviewPolicy=reviewPolicy;
         this.genrePlanPolicy=genrePlanPolicy; this.genreOutlinePolicy=genreOutlinePolicy;
@@ -78,6 +81,8 @@ public class ReviewAggregator {
         review=proseBoundary.apply(target,action,candidate,review);
         review=rollingPlanState.apply(novel,target,action,instructions,candidate,review);
         review=reviewPolicy.normalize(validate(review),candidate,previous);
+        review=planWordBudget.apply(novel,target,action,candidate,review);
+        review=EndingGoalPlanAudit.apply(novel,target,action,candidate,review);
         review=explicitRevealBoundaryPolicy.apply(novel,target,action,candidate,review);
         review=genrePlanPolicy.apply(novel,target,action,candidate,review);
         review=genreOutlinePolicy.apply(novel,target,action,instructions,candidate,review);

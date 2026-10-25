@@ -63,7 +63,7 @@ public record PlanCausalityAudit(List<Finding> findings) {
     private static String referenceText(JsonNode context) {
         if(context==null) return "";
         StringBuilder out=new StringBuilder();
-        for(String field:List.of("authoritativeReferences","canonBeforeChapter","previousChapterSummary"))
+        for(String field:List.of("authoritativeReferences","planStoryEngine","canonBeforeChapter","previousChapterSummary"))
             appendValues(context.path(field),out);
         return out.toString();
     }

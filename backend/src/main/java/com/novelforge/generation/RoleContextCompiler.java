@@ -82,7 +82,8 @@ public class RoleContextCompiler {
             copy(input,output,access,Section.OUTLINE_REVISION_BOUNDARY,"outlineRevisionBoundary");
             copy(input,output,access,Section.STATE_MODEL,"stateModel","planningState");
             copy(input,output,access,Section.WORD_BUDGET,"targetWords","approvedMaxWords","confirmedWords",
-                    "nextChapter","nextBatch","remainingWordsToTarget","remainingWordsToApprovedMax");
+                    "nextChapter","nextBatch","remainingWordsToTarget","remainingWordsToApprovedMax",
+                    "planningWordBudget");
             copy(input,output,access,Section.FORMAL_CANON,"canonBeforeChapter");
             copy(input,output,access,Section.KNOWN_IDENTITIES,"knownIdentityHints");
             copy(input,output,access,Section.STRUCTURED_MEMORY,"formalStructuredMemory");
@@ -90,6 +91,7 @@ public class RoleContextCompiler {
                     "unwrittenChapterBeforeNewBatch","planningBoundaryNote");
             copy(input,output,access,Section.PLAN_COMPARISON,"planComparison");
             copy(input,output,access,Section.PLAN_STORY_ENGINE,"planStoryEngine");
+            copy(input,output,access,Section.ENDING_GOALS,"completionGoals","completionOpenForeshadowLeads");
             copy(input,output,access,Section.CHAPTER_BRIEF,"chapterBrief");
             copy(input,output,access,Section.HISTORICAL_SUMMARIES,"previousChapterSummary");
             copy(input,output,access,Section.RETRIEVED_HISTORY,"retrievedConfirmedHistory");

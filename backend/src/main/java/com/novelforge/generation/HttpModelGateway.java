@@ -65,10 +65,10 @@ public class HttpModelGateway implements ModelGateway {
         if (request.action()==Action.REWRITE) return withStage("写作生成",()->{
             if (request.target()==null || request.target().latest()==null) throw new Problem(409,"修订目标不存在或没有版本");
             if (request.target().kind==com.novelforge.novel.Novel.Kind.OUTLINE)
-                return call("prompts/outline-architect.txt",input(request,null,false),Generated.class,
+                return generateWithJsonRetry("prompts/outline-architect.txt",input(request,null,false),
                         false,maxTokens,"outline-rewrite");
             if (request.target().kind==com.novelforge.novel.Novel.Kind.CHAPTER && fullChapterRewrite(request.instructions())) {
-                Generated rewritten=call("prompts/chapter-rewriter.txt",input(request,null,false),Generated.class,
+                Generated rewritten=generateWithJsonRetry("prompts/chapter-rewriter.txt",input(request,null,false),
                         false,maxTokens,"chapter-rewrite");
                 Generated result=new Generated(rewritten.title(),rewritten.content(),rewritten.summary(),rewritten.facts(),null);
                 requireRequestedChapterChange(request,result);
@@ -92,13 +92,42 @@ public class HttpModelGateway implements ModelGateway {
             case PLAN -> "prompts/plan-writer.txt";
             default -> "prompts/writer.txt";
         };
-        return withStage("写作生成", () -> call(prompt, input(request, null, false), Generated.class,
-                thinking,maxTokens,"generate"));
+        return withStage("写作生成", () -> {
+            String payload=input(request,null,false);
+            return generateWithJsonRetry(prompt,payload,thinking,maxTokens,"generate");
+        });
+    }
+
+    /** Retry only a malformed final JSON response, before any generated candidate is persisted. */
+    private Generated generateWithJsonRetry(String prompt,String payload,boolean thinking,int outputLimit,String operation) {
+        try {
+            return call(prompt,payload,Generated.class,thinking,outputLimit,operation);
+        } catch(Problem first) {
+            // An ambiguous chapter ordinal is a semantic choice, not a serialization glitch.
+            if(first.getMessage().contains("必须是整数") || first.getMessage().contains("无法唯一确定"))
+                throw first;
+            if(!first.getMessage().contains("模型 JSON 解析失败")
+                    && !first.getMessage().contains("模型 JSON 不完整或字符串未闭合")
+                    && !first.getMessage().contains("模型 JSON 缺少必要字段或类型错误")) throw first;
+            String reminder="上一次模型响应的 JSON 语法或字段类型错误，候选内容未保存。请重新生成完整内容，"
+                    +"只返回一个有效 JSON 对象，正确转义正文中的引号和换行，不要代码围栏或附加说明。";
+            try {
+                ObjectNode retry=(ObjectNode)mapper.readTree(payload);
+                retry.put("responseFormatReminder",reminder);
+                return call(prompt,mapper.writeValueAsString(retry),Generated.class,thinking,outputLimit,
+                        operation+"-json-retry");
+            } catch(Problem second) {
+                throw new Problem(second.status,"生成 JSON 格式错误或未闭合后已自动重试 1 次；重试失败："
+                        +second.getMessage().replace("未自动重试","不再重试"));
+            } catch(IOException encoding) {
+                throw new Problem(500,"章节 JSON 重试请求无法编码；原有内容未覆盖");
+            }
+        }
     }
 
     public Generated outlineFoundation(Request request) {
-        return withStage("大纲人物世界参谋",()->call("prompts/outline-foundation.txt",
-                input(request,null,false),Generated.class,false,Math.min(maxTokens,6000),"outline-foundation"));
+        return withStage("大纲人物世界参谋",()->generateWithJsonRetry("prompts/outline-foundation.txt",
+                input(request,null,false),false,Math.min(maxTokens,6000),"outline-foundation"));
     }
 
     public Review outlineContinuityReview(Request request,Generated candidate) {
@@ -122,7 +151,7 @@ public class HttpModelGateway implements ModelGateway {
         boolean contentRequested=fullChapterRewrite(instruction)
                 || instruction.contains("正文") && List.of("修改","修订","改写","重写","润色","删减","调整","删除","补写")
                 .stream().anyMatch(instruction::contains);
-        boolean explicitlyUnchanged=List.of("不修改正文","正文不变","正文保持不变","只补充摘要","仅补充摘要","只修改标题")
+        boolean explicitlyUnchanged=List.of("不修改正文","不修改标题、正文","正文不变","正文保持不变","只补充摘要","仅补充摘要","只修改标题")
                 .stream().anyMatch(instruction::contains);
         if(contentRequested && !explicitlyUnchanged
                 && Objects.equals(request.target().latest().content,result.content()))
@@ -195,6 +224,8 @@ public class HttpModelGateway implements ModelGateway {
             input.put("chapterContent",candidate.content());
             JsonNode items=context.path("currentChapterPlan").path("acceptanceItems");
             input.put("planAcceptanceItems",items.isArray()?items:List.of());
+            input.put("previousChapterSummary",context.path("previousChapterSummary").asText(""));
+            input.put("currentChapterPlan",context.path("currentChapterPlan"));
             var claims=new ArrayList<Map<String,String>>();
             if (candidate.facts()!=null) for (var fact:candidate.facts())
                 for (String claim:factAtomicity.claims(fact.detail()))
@@ -229,6 +260,17 @@ public class HttpModelGateway implements ModelGateway {
                         "当前档案原文：“"+expected.factDetail()+"”｜正文中没有找到支持该原子声明的逐字证据",
                         "只修改档案条目：删除无依据的声明，或拆分并保留正文已经支持的原子事实；不要为通过检查向正文补写解释句",
                         "必须修正"));
+            }
+            for (ChapterEvidenceAudit.NarrativeFinding finding:audit.narrativeFindings()) {
+                if(finding==null || finding.firstQuote()==null || finding.secondQuote()==null
+                        || finding.firstQuote().length()<4 || finding.secondQuote().length()<4
+                        || finding.firstQuote().equals(finding.secondQuote())
+                        || !candidate.content().contains(finding.firstQuote())
+                        || !candidate.content().contains(finding.secondQuote())) continue;
+                checked=checked.withIssue(new com.novelforge.novel.Novel.ReviewIssue(
+                        "当前章节正文 > 线索与叙事连续性",finding.problem(),
+                        "候选原文：“"+finding.firstQuote()+"”｜候选原文：“"+finding.secondQuote()+"”",
+                        finding.suggestion(),finding.severity()));
             }
             return checked;
         } catch (Problem p) { throw p; }

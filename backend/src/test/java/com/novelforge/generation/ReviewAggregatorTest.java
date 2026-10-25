@@ -19,7 +19,8 @@ class ReviewAggregatorTest {
     private final WordCounter words=new WordCounter();
     private final RequirementAuthority requirementAuthority=new RequirementAuthority();
     private final ReviewAggregator aggregator=new ReviewAggregator(words,new ExplicitWordLimit(),
-            new OutlineBudgetAudit(),new FactAtomicityPolicy(),new ProseBoundaryPolicy(),new RollingPlanStatePolicy(),
+            new OutlineBudgetAudit(),new PlanWordBudgetAudit(words),new FactAtomicityPolicy(),
+            new ProseBoundaryPolicy(),new RollingPlanStatePolicy(),
             new ReviewConvergence(),new ReviewPolicy(),
             new GenrePlanPolicy(new GenreNarrativeProfile(requirementAuthority)),
             new GenreOutlinePolicy(new GenreNarrativeProfile(requirementAuthority)),
@@ -118,6 +119,27 @@ class ReviewAggregatorTest {
 
         assertThat(result.passed()).isTrue();
         assertThat(result.issueDetails()).isEmpty();
+    }
+
+    @Test
+    void keepsLocallyCalculatedPlanBudgetIssueAfterModelReportNormalization() {
+        Novel novel=new Novel(); novel.targetWords=5000; novel.approvedMaxWords=5500;
+        Artifact chapter=chapter();
+        Novel.Version written=new Novel.Version(); written.content="字".repeat(3000);
+        chapter.versions.add(written); chapter.approvedVersionId=written.id;
+        novel.artifacts.add(chapter);
+        Novel.Plan plan=new Novel.Plan(); plan.startChapter=2; plan.endChapter=4; plan.finalBatch=true;
+        plan.chapters=List.of(new Novel.ChapterBeat(2,"第二章","继续",1200,List.of(),"",""),
+                new Novel.ChapterBeat(3,"第三章","转折",1200,List.of(),"",""),
+                new Novel.ChapterBeat(4,"第四章","结局",1200,List.of(),"",""));
+        var generated=new ModelGateway.Generated("规划","章节规划由系统生成","摘要",List.of(),plan);
+        Review raw=new Review(true,List.of(),false,false,false,List.of());
+
+        Review result=aggregator.aggregate(novel,null,Action.PLAN,"",generated,null,raw);
+
+        assertThat(result.passed()).isFalse();
+        assertThat(result.issueDetails()).anySatisfy(issue->
+                assertThat(issue.problem()).contains("建议字数合计超过已批准的全书上限"));
     }
 
     @Test

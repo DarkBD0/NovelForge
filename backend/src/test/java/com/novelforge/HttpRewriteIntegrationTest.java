@@ -291,7 +291,10 @@ class HttpRewriteIntegrationTest {
     Plan finalPlan() {
         Plan plan=new Plan(); plan.startChapter=1; plan.endChapter=1; plan.prepareNextAfterChapter=1; plan.finalBatch=true;
         plan.triggerReason="本批结尾收束故事"; plan.handoff="故事明确结局"; plan.assumptions="";
-        plan.chapters=List.of(new ChapterBeat(1,"结局","回收伏笔，解决主线")); return plan;
+        plan.chapters=List.of(new ChapterBeat(1,"结局","回收伏笔，解决主线"));
+        plan.resolutionSteps=List.of(new ResolutionStep("ending_main",1,"解决主线并回收伏笔",
+                "人物行动与结果","完整的测试主线与明确结局","不把规划当作已发生正文"));
+        return plan;
     }
     Generated generated(Action action) {
         if (action==Action.OUTLINE)
@@ -395,6 +398,8 @@ class HttpRewriteIntegrationTest {
                 new ChapterBeat(1,"旧照","照片肯定拍在火灾前",null,
                         List.of("她断定旧照片拍于火灾之前"),"",""),
                 new ChapterBeat(2,"火灾","她第一次得知楼里曾发生火灾"));
+        plan.resolutionSteps=List.of(new ResolutionStep("ending_main",2,"解决主线",
+                "已确认的调查结果","形成明确结局","不把猜测当事实"));
         reply(JSON.writeValueAsString(new Generated("规划","候选规划","测试摘要",List.of(),plan)));
         reply(JSON.writeValueAsString(new Review(true,List.of(),false,false,false)));
         reply(JSON.writeValueAsString(Map.of("findings",List.of(

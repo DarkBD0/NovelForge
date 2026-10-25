@@ -85,6 +85,19 @@ public class ContextAssembler {
             root.put("planningBoundaryNote","这是提前生成下一批规划：新批次必须从 nextBatchStartChapter 开始；nextChapter 仍属于已确认的当前批次，不能放入新批次，也不能造成重叠或跳章。");
         }
         if (action==Action.PLAN || target!=null&&target.kind==Kind.PLAN) {
+            long confirmedWords=words.approvedWords(n);
+            int nextUnwritten=rules.nextChapter(n);
+            long priorUnwrittenSuggested=rules.plans(n).stream()
+                    .filter(a->target==null || !a.id.equals(target.id))
+                    .flatMap(a->a.approved().plan.chapters.stream())
+                    .filter(beat->beat.number()>=nextUnwritten && beat.targetWords()!=null)
+                    .mapToLong(beat->beat.targetWords()).sum();
+            root.put("planningWordBudget",Map.of(
+                    "confirmedWords",confirmedWords,
+                    "priorUnwrittenSuggestedWords",priorUnwrittenSuggested,
+                    "availableForThisAndLaterBatches",Math.max(0,n.approvedMaxWords-confirmedWords-priorUnwrittenSuggested),
+                    "approvedMaxWords",n.approvedMaxWords,
+                    "rule","本批建议字数与此前未写章节预留之和不能超出批准上限；非最终批次还要给结局留篇幅"));
             var planningState=new LinkedHashMap<String,Object>();
             PlanRevisionMode.Mode planMode=PlanRevisionMode.resolve(n,action,target);
             planningState.put("mode",planMode.name());
@@ -114,27 +127,45 @@ public class ContextAssembler {
         root.put("remainingWordsToTarget", Math.max(0,n.targetWords-words.approvedWords(n)));
         root.put("remainingWordsToApprovedMax", Math.max(0,n.approvedMaxWords-words.approvedWords(n)));
         root.put("canonBeforeChapter", contextCanon(n,chapter));
-        if(action==Action.COMPLETE) root.put("completionOpenForeshadowLeads",canon.at(n,Integer.MAX_VALUE).stream()
-                .filter(entry->entry.fact()!=null && "FORESHADOW".equals(entry.fact().type())
-                        && "OPEN".equals(entry.fact().state()))
-                .map(entry->Map.of("chapter",entry.chapter(),"detail",entry.fact().detail()))
-                .toList());
+        if(action==Action.COMPLETE) {
+            root.put("completionGoals",EndingGoalContract.from(n));
+            root.put("completionOpenForeshadowLeads",canon.at(n,Integer.MAX_VALUE).stream()
+                    .filter(entry->entry.fact()!=null && "FORESHADOW".equals(entry.fact().type())
+                            && "OPEN".equals(entry.fact().state()))
+                    .map(entry->Map.of("chapter",entry.chapter(),"detail",entry.fact().detail()))
+                    .toList());
+        }
         if((action==Action.CHAPTER || target!=null && target.kind==Kind.CHAPTER))
             root.put("knownIdentityHints",knownIdentityHints(n,chapter));
         rules.plans(n).stream().filter(a -> a.approved().plan.startChapter<=chapter && a.approved().plan.endChapter>=chapter)
                 .reduce((first,second)->second).ifPresent(a -> {
                     ChapterBeat beat=a.approved().plan.chapters.stream().filter(item -> item.number()==chapter).findFirst().orElse(null);
                     if (beat!=null) {
-                        List<String> eventUnits=acceptanceItems(beat.purpose());
+                        List<String> eventUnits=new ArrayList<>(acceptanceItems(beat.purpose()));
+                        List<String> resolutionRequirements=new ArrayList<>();
+                        List<ResolutionStep> steps=a.approved().plan.resolutionSteps==null?List.of()
+                                :a.approved().plan.resolutionSteps;
+                        Map<String,EndingGoalContract.Goal> goals=new HashMap<>();
+                        EndingGoalContract.from(n).forEach(goal->goals.put(goal.id(),goal));
+                        for(ResolutionStep step:steps) if(step!=null && step.chapterNumber()==chapter) {
+                            EndingGoalContract.Goal goal=goals.get(step.goalId());
+                            String requirement="结局目标“"+(goal==null?step.expectedResult():goal.goal())+"”："
+                                    +step.action()+"；依据来源："+step.evidenceSource()+"；必须得到："
+                                    +step.expectedResult()+"；不得越过："+step.certaintyBoundary();
+                            resolutionRequirements.add(requirement);
+                            eventUnits.add(requirement);
+                        }
                         var currentPlan=new LinkedHashMap<String,Object>();
                         currentPlan.put("batch",a.batchNumber); currentPlan.put("number",beat.number());
                         currentPlan.put("title",beat.title()); currentPlan.put("purpose",beat.purpose());
                         currentPlan.put("acceptanceItems",eventUnits);
+                        if(!resolutionRequirements.isEmpty()) currentPlan.put("resolutionRequirements",resolutionRequirements);
                         root.put("currentChapterPlan",currentPlan);
 
                         ChapterBudget budget=chapterBudget(n,action,target,chapter,beat);
                         var brief=new LinkedHashMap<String,Object>();
                         brief.put("coreChange",beat.purpose());
+                        if(!resolutionRequirements.isEmpty()) brief.put("resolutionRequirements",resolutionRequirements);
                         brief.put("sceneBeats",beat.sceneBeats().isEmpty()?eventUnits:beat.sceneBeats());
                         brief.put("sceneBeatUsage","场景节点提供可选的实现路径；必须保留本章核心变化、明确主事件和揭示边界，但可压缩不可信或无作用的技术细节。不要逐条照抄场景节点或让每次查看都得到新证据。");
                         brief.put("minimumScenes",1); brief.put("maximumScenes",4);
@@ -247,6 +278,8 @@ public class ContextAssembler {
         putNonblank(engine,"protagonistGoal",spec.protagonistGoal);
         putNonblank(engine,"coreConflict",spec.coreConflict);
         putNonblank(engine,"endingContract",spec.endingContract);
+        List<EndingGoalContract.Goal> goals=EndingGoalContract.from(novel);
+        if(!goals.isEmpty()) engine.put("endingGoals",goals);
         if(spec.characters!=null) {
             List<Map<String,String>> arcs=spec.characters.stream().filter(Objects::nonNull)
                     .filter(character->"PROTAGONIST".equals(character.roleTier)

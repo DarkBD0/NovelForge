@@ -367,6 +367,33 @@ class ContextAssemblerTest {
         assertThat(json.path("planningState").path("recentAverageChapterWords").asInt()).isEqualTo(6);
     }
 
+    @Test void plannerSeesBudgetAfterReservingUnwrittenPriorBatch() throws Exception {
+        ObjectMapper mapper=new ObjectMapper(); WordCounter words=new WordCounter(); WorkflowRules rules=new WorkflowRules(words);
+        RequirementAuthority authority=new RequirementAuthority();
+        ContextAssembler assembler=new ContextAssembler(new CanonService(),rules,words,mapper,100_000,
+                authority,new GenreNarrativeProfile(authority));
+        Novel novel=new Novel(); novel.title="短篇预算"; novel.synopsis="完整结局";
+        novel.targetWords=5000; novel.approvedMaxWords=5500;
+        for(int number=1;number<=3;number++) {
+            Artifact written=chapter(number,"已确认"); written.approved().content="字".repeat(1000);
+            novel.artifacts.add(written);
+        }
+        Artifact previous=plan();
+        previous.approved().plan.chapters=List.of(new ChapterBeat(2,"已写","已写",1000,List.of(),"",""),
+                new ChapterBeat(3,"已写","已写",1000,List.of(),"",""),
+                new ChapterBeat(4,"未写","未写",1000,List.of(),"",""));
+        previous.approved().plan.endChapter=4;
+        novel.artifacts.add(previous);
+
+        var request=new ModelGateway.Request(Action.PLAN,novel,null,assembler.assemble(novel,Action.PLAN,null),"");
+        var compiled=new RoleContextCompiler(mapper,new AgentContextPolicy()).compile(request,AgentRole.ROLLING_PLANNER);
+        var budget=mapper.readTree(compiled.context().json()).path("planningWordBudget");
+
+        assertThat(budget.path("confirmedWords").asLong()).isEqualTo(3000);
+        assertThat(budget.path("priorUnwrittenSuggestedWords").asLong()).isEqualTo(1000);
+        assertThat(budget.path("availableForThisAndLaterBatches").asLong()).isEqualTo(1500);
+    }
+
     @Test void chapterReviewKeepsActivePlanAndOutlineWithoutRepeatingOldBatchBodiesOrOutlineSpec() throws Exception {
         ObjectMapper mapper=new ObjectMapper(); WordCounter words=new WordCounter(); WorkflowRules rules=new WorkflowRules(words);
         RequirementAuthority authority=new RequirementAuthority();
@@ -451,6 +478,50 @@ class ContextAssemblerTest {
                 .contains("持续有效的世界规则","尚未回收的伏笔","最近事件细节");
         assertThat(json.path("acceptedReferences").toString()).contains("早期事件已经发生，摘要保留细节");
         assertThat(json.path("stateModel").path("olderEventCoverage").asText()).contains("已确认摘要");
+    }
+
+    @Test void endingGoalFlowsIntoPlannerChapterAndCompletionWithoutTreatingPlanAsOccurred() throws Exception {
+        ObjectMapper mapper=new ObjectMapper(); WordCounter words=new WordCounter(); WorkflowRules rules=new WorkflowRules(words);
+        RequirementAuthority authority=new RequirementAuthority();
+        ContextAssembler assembler=new ContextAssembler(new CanonService(),rules,words,mapper,100_000,
+                authority,new GenreNarrativeProfile(authority));
+        Novel novel=new Novel(); novel.title="寻人"; novel.synopsis="寻找姐姐";
+        novel.targetWords=5000; novel.approvedMaxWords=5500;
+        Artifact outline=new Artifact(); outline.kind=Kind.OUTLINE;
+        Version outlineVersion=new Version(); outlineVersion.content="寻找姐姐";
+        outlineVersion.outlineSpec=new OutlineSpec(); outlineVersion.outlineSpec.endingContract="查清具体去向";
+        OutlineSpec.EndingGoal goal=new OutlineSpec.EndingGoal(); goal.id="where";
+        goal.goal="查清姐姐的具体去向"; goal.proofStandard="可信信息能确定所在城市";
+        outlineVersion.outlineSpec.endingGoals=List.of(goal);
+        outline.versions.add(outlineVersion); outline.approvedVersionId=outlineVersion.id; novel.artifacts.add(outline);
+        Artifact plan=plan(); plan.approved().plan.startChapter=1; plan.approved().plan.endChapter=1;
+        plan.approved().plan.chapters=List.of(new ChapterBeat(1,"找到人","主角联系姐姐"));
+        plan.approved().plan.finalBatch=true;
+        plan.approved().plan.resolutionSteps=List.of(new ResolutionStep("where",1,"联系本人","本人亲口确认",
+                "知道姐姐所在城市","不能推断详细住址"));
+        novel.artifacts.add(plan);
+        RoleContextCompiler compiler=new RoleContextCompiler(mapper,new AgentContextPolicy());
+
+        var planRequest=new ModelGateway.Request(Action.PLAN,novel,null,
+                assembler.assemble(novel,Action.PLAN,null),"");
+        var planner=mapper.readTree(compiler.compile(planRequest,AgentRole.ROLLING_PLANNER).context().json());
+        assertThat(planner.path("planStoryEngine").path("endingGoals").toString())
+                .contains("查清姐姐的具体去向","可信信息能确定所在城市");
+
+        var chapterRequest=new ModelGateway.Request(Action.CHAPTER,novel,null,
+                assembler.assemble(novel,Action.CHAPTER,null),"");
+        var writer=mapper.readTree(compiler.compile(chapterRequest,AgentRole.CHAPTER_WRITER).context().json());
+        var auditor=mapper.readTree(compiler.compile(chapterRequest,AgentRole.CONTENT_AUDITOR).context().json());
+        assertThat(writer.path("currentChapterPlan").path("resolutionRequirements").toString())
+                .contains("本人亲口确认","知道姐姐所在城市");
+        assertThat(auditor.path("currentChapterPlan").path("acceptanceItems").toString())
+                .contains("结局目标");
+
+        var completeRequest=new ModelGateway.Request(Action.COMPLETE,novel,null,
+                assembler.assemble(novel,Action.COMPLETE,null),"");
+        var completion=mapper.readTree(compiler.compile(completeRequest,AgentRole.COMPLETION_AUDITOR).context().json());
+        assertThat(completion.path("completionGoals").toString()).contains("可信信息能确定所在城市");
+        assertThat(completion.has("planStoryEngine")).isFalse();
     }
 
     private Artifact chapter(int number,String summary) {

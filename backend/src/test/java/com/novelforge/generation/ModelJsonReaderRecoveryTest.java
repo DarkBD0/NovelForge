@@ -14,6 +14,38 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ModelJsonReaderRecoveryTest {
     private final ModelJsonReader reader=new ModelJsonReader(new ObjectMapper());
 
+    @Test void malformedOptionalEndingStepDoesNotDiscardACompletePlanDraft() {
+        String json="""
+                {"title":"结局规划","content":"正文规划","summary":"结局摘要","facts":[],
+                 "plan":{"startChapter":5,"endChapter":5,"prepareNextAfterChapter":5,"finalBatch":true,
+                 "triggerReason":"收束","handoff":"故事结束","assumptions":"",
+                 "chapters":[{"number":5,"title":"结局","purpose":"主角解决问题"}],
+                 "resolutionSteps":[{"goalId":"where","chapterNumber":"稍后","action":"查证"}]}}
+                """;
+
+        ModelGateway.Generated generated=reader.read(json,ModelGateway.Generated.class);
+
+        assertThat(generated.plan()).isNotNull();
+        assertThat(generated.plan().resolutionSteps).isEmpty();
+        assertThat(generated.content()).contains("第5章","主角解决问题");
+    }
+
+    @Test void exactEndingStepChapterOrdinalIsNormalizedLikeOtherPlanNumbers() {
+        String json="""
+                {"title":"结局规划","content":"正文规划","summary":"结局摘要","facts":[],
+                 "plan":{"startChapter":5,"endChapter":5,"prepareNextAfterChapter":5,"finalBatch":true,
+                 "triggerReason":"收束","handoff":"故事结束","assumptions":"",
+                 "chapters":[{"number":5,"title":"结局","purpose":"主角解决问题"}],
+                 "resolutionSteps":[{"goalId":"where","chapterNumber":"第五章","action":"联系本人",
+                 "evidenceSource":"本人回应","expectedResult":"得知所在城市","certaintyBoundary":"不推断详细住址"}]}}
+                """;
+
+        ModelGateway.Generated generated=reader.read(json,ModelGateway.Generated.class);
+
+        assertThat(generated.plan().resolutionSteps).singleElement().satisfies(step->
+                assertThat(step.chapterNumber()).isEqualTo(5));
+    }
+
     @Test void normalizesExactChapterOrdinalsInsidePlanRewrite() {
         String json="""
                 {"operations":[{"op":"SET_PLAN","plan":{

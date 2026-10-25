@@ -10,7 +10,9 @@ import com.novelforge.novel.Novel.*;
 import com.novelforge.outline.OutlineRenderer;
 import com.novelforge.outline.OutlineStructureService;
 import com.novelforge.task.TaskService;
+import com.novelforge.workflow.WorkflowRules;
 import com.novelforge.workflow.WorkflowService;
+import com.novelforge.novel.WordCounter;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -36,11 +38,77 @@ import static org.awaitility.Awaitility.await;
 class LivePlanAcceptanceIT {
     @Autowired NovelRepository repository;
     @Autowired WorkflowService workflow;
+    @Autowired WorkflowRules rules;
+    @Autowired WordCounter words;
     @Autowired TaskService tasks;
     @Autowired OutlineRenderer outlineRenderer;
     @Autowired OutlineStructureService outlineStructure;
     @Autowired DeterministicStyleEditor styleEditor;
     @Autowired ModelGateway modelGateway;
+
+    @Test void realModelCreatesExplicitEndingGoalsForANewShortOutline() {
+        Novel novel=new Novel(); novel.title="雨夜的回信";
+        novel.synopsis="顾乔收到失踪姐姐寄来的旧明信片。她沿着明信片上的线索寻找，最终确认姐姐是否愿意见她。";
+        novel.targetWords=3000; novel.approvedMaxWords=3300;
+        String context="""
+                {"title":"雨夜的回信","synopsis":"顾乔收到失踪姐姐寄来的旧明信片。她沿着明信片上的线索寻找，最终确认姐姐是否愿意见她。",
+                "requirements":"短篇悬疑，人物选择比复杂机关重要","targetWords":3000,"approvedMaxWords":3300,
+                "genreContract":{"mode":"SUSPENSE"}}
+                """;
+
+        ModelGateway.Generated generated=modelGateway.generate(new ModelGateway.Request(Action.OUTLINE,novel,null,
+                new ContextAssembler.Context(context,List.of(),1,1),""));
+
+        assertThat(generated.outlineSpec()).isNotNull();
+        assertThat(generated.outlineSpec().schemaVersion).isEqualTo("4");
+        assertThat(generated.outlineSpec().endingGoals).hasSizeBetween(1,3);
+        assertThat(generated.outlineSpec().endingGoals).allSatisfy(goal->
+                assertThat(goal.proofStandard).isNotBlank());
+    }
+
+    @Test void realModelDoesNotTreatAWeakRumorAsThePlannedEndingResult() {
+        Novel novel=new Novel(); novel.title="失踪的姐姐";
+        Artifact target=new Artifact(); target.kind=Kind.CHAPTER; target.chapterNumber=5;
+        String requirement="结局目标“查清姐姐的具体去向”：联系本人；依据来源：本人回应；必须得到：她所在的城市；不得越过：不能推断详细住址";
+        String prose="老邻居说姐姐可能去了南方，具体哪座城市她也不清楚。顾乔没有联系上姐姐，只好先回家。";
+        var candidate=new ModelGateway.Generated("第五章",prose,"顾乔只得到一个模糊去向",List.of(),null);
+        var context=new ContextAssembler.Context("{\"currentChapterPlan\":{\"acceptanceItems\":[\""+requirement+"\"]}}",
+                List.of(),5,1);
+        Review review=modelGateway.review(new ModelGateway.Request(Action.REVIEW,novel,target,context,""),candidate);
+
+        assertThat(review.passed()).isFalse();
+        assertThat(review.issueDetails()).anyMatch(issue->issue.problem().contains("查清姐姐的具体去向"));
+    }
+
+    @Test void realModelAcceptsAVisibleCareerChoiceWithoutDemandingInvestigationEvidence() {
+        Novel novel=new Novel(); novel.title="最后一份录用";
+        Artifact target=new Artifact(); target.kind=Kind.CHAPTER; target.chapterNumber=5;
+        String requirement="结局目标“选定工作”：主人公亲自作出选择；依据来源：回复录用邮件并得到确认；必须得到：他接受甲公司的岗位；不得越过：不声称其他公司已经签约";
+        String prose="他把乙公司的录用信放进抽屉，回复甲公司的人事：我接受这个岗位。十分钟后，甲公司回信确认他的入职日期。他把这封回信给母亲看，终于能说自己要去哪里上班。";
+        var candidate=new ModelGateway.Generated("第五章",prose,"主人公接受甲公司的岗位并收到确认",List.of(),null);
+        var context=new ContextAssembler.Context("{\"currentChapterPlan\":{\"acceptanceItems\":[\""+requirement+"\"]}}",
+                List.of(),5,1);
+        Review review=modelGateway.review(new ModelGateway.Request(Action.REVIEW,novel,target,context,""),candidate);
+
+        assertThat(review.issueDetails()).noneMatch(issue->issue.problem().contains("正文没有完整落实规划要求"));
+    }
+
+    @Test void realCompletionDoesNotCountAFuturePlanAsConfirmedEndingProse() {
+        Novel novel=new Novel(); novel.title="失踪的姐姐"; novel.synopsis="顾乔寻找失踪的姐姐，最终查清她的具体去向";
+        String context="""
+                {"title":"失踪的姐姐","synopsis":"顾乔寻找失踪的姐姐，最终查清她的具体去向",
+                "completionGoals":[{"id":"where","goal":"查清姐姐的具体去向","proofStandard":"已确认正文中有可信信息确定她所在城市","sourceVersionId":"outline_1"}],
+                "acceptedReferences":[{"kind":"PLAN","authorityState":"CONFIRMED","temporalState":"FUTURE_CONDITIONAL_DESIGN","summary":"第五章将联系姐姐，查明她住在哪座城市"},
+                {"kind":"CHAPTER","authorityState":"CONFIRMED","temporalState":"OCCURRED","chapter":5,"summary":"顾乔只听邻居说姐姐可能去了南边，具体城市未知","content":"邻居说姐姐可能去了南边，具体哪座城市她也不清楚。顾乔没有联系上姐姐。"}]}
+                """;
+
+        Review review=modelGateway.review(new ModelGateway.Request(Action.COMPLETE,novel,null,
+                new ContextAssembler.Context(context,List.of(),6,1),""),null);
+
+        assertThat(review.mainlineResolved() && review.endingClear()).isFalse();
+        assertThat(review.issueDetails()).anyMatch(issue->issue.problem().contains("去向")
+                || issue.problem().contains("城市"));
+    }
 
     @Test void realModelFlagsUnsupportedSourceAndUndatedPhotoInference() {
         Novel novel=new Novel(); novel.title="证据边界检查验收";
@@ -64,8 +132,86 @@ class LivePlanAcceptanceIT {
         assertThat(review.issueDetails()).anyMatch(issue->"必须修正".equals(issue.severity()));
     }
 
+    @Test void realModelFlagsContradictoryNameCarrierInOneChapter() {
+        Novel novel=new Novel(); novel.title="旧照线索核验";
+        Artifact target=new Artifact(); target.kind=Kind.CHAPTER; target.chapterNumber=1;
+        String prose="""
+                顾乔从母亲的衣柜里找出一张旧照片和一封没有寄出的短笺。
+                顾乔把短笺翻过来。背面用圆珠笔写着一个名字：林秋宁。
+                她盯着照片里母亲身边的女人看，想不起母亲提过这个人。
+                她又看了看照片背面的“林秋宁”三个字，决定去问旧邻居。
+                """;
+        var candidate=new ModelGateway.Generated("第一章",prose,"顾乔发现林秋宁的名字",List.of(),null);
+        var request=new ModelGateway.Request(Action.REVIEW,novel,target,
+                new ContextAssembler.Context("{\"previousChapterSummary\":\"\",\"currentChapterPlan\":{\"acceptanceItems\":[]}}",
+                        List.of(),1,1),"");
+
+        Review review=modelGateway.review(request,candidate);
+
+        review.issueDetails().forEach(issue->System.out.println("LIVE_CARRIER_ISSUE="+issue.severity()+" "+issue.problem()));
+        assertThat(review.passed()).isFalse();
+        assertThat(review.issueDetails()).anyMatch(issue->"必须修正".equals(issue.severity())
+                && issue.problem().contains("短笺") && issue.problem().contains("照片")
+                && issue.evidence().contains("背面用圆珠笔写着一个名字：林秋宁"));
+    }
+
+    @Test void realModelFlagsPlanGoalWithoutVerifiableClue() {
+        Novel novel=new Novel(); novel.title="旧照片线索验收";
+        Plan plan=new Plan(); plan.startChapter=4; plan.endChapter=5; plan.finalBatch=true;
+        plan.chapters=List.of(
+                new ChapterBeat(4,"模糊去向","顾乔获得可独立核实的具体去向",850,
+                        List.of("邻居只记得林秋宁投奔南边亲戚，具体城市她不确定，也没有姓名地址或其他记录"),"",""),
+                new ChapterBeat(5,"直接寻人","顾乔只凭邻居提供的地点直接找到林秋宁的住址",850,
+                        List.of("顾乔没有其他线索，直接按照邻居说的具体地址登门"),"",""));
+        var candidate=new ModelGateway.Generated("章节规划",PlanNarrativeRenderer.render(plan),"顾乔寻找林秋宁",List.of(),plan);
+        var request=new ModelGateway.Request(Action.PLAN,novel,null,
+                new ContextAssembler.Context("{\"nextChapter\":4}",List.of(),4,1),"");
+
+        Review review=modelGateway.review(request,candidate);
+
+        review.issueDetails().forEach(issue->System.out.println("LIVE_PLAN_CLUE_ISSUE="+issue.severity()+" "+issue.problem()));
+        assertThat(review.passed()).isFalse();
+        assertThat(review.issueDetails()).anyMatch(issue->"必须修正".equals(issue.severity()));
+    }
+
+    @Test void realModelDoesNotTreatVagueHearsayAsVerifiedDestination() {
+        Novel novel=new Novel(); novel.title="旧照调查";
+        String context="""
+                {"title":"旧照调查","synopsis":"顾乔要查清林秋宁的具体去向与母亲未寄信的缘由。",
+                 "authoritativeReferences":[{"kind":"PLAN","content":"最终章必须独立核实林秋宁的具体去向，查明母亲未寄信的缘由。"}],
+                 "confirmedChapterSummaries":[{"chapter":5,"summary":"顾乔据周惠芳转述，林秋宁可能搬去了外省；她猜母亲怕打扰对方所以没寄信。"}],
+                 "recentConfirmedChapterProse":[{"chapter":5,"content":"周惠芳说：‘听厂里老姐妹提过一嘴，林秋宁后来去了外省，具体城市我也不知道。’顾乔没有再查登记或见林秋宁本人。她想，母亲也许怕打扰对方，才没有寄出那封信。"}]}
+                """;
+        var request=new ModelGateway.Request(Action.COMPLETE,novel,null,
+                new ContextAssembler.Context(context,List.of(),6,1),"");
+
+        Review review=modelGateway.review(request,null);
+
+        review.issueDetails().forEach(issue->System.out.println("LIVE_COMPLETION_DESTINATION_ISSUE="+issue.severity()+" "+issue.problem()));
+        assertThat(review.mainlineResolved()).isFalse();
+    }
+
+    @Test void realModelFlagsFinalPlanThatPostponesOutlineEnding() {
+        Novel novel=new Novel(); novel.title="旧照调查";
+        Plan plan=new Plan(); plan.startChapter=5; plan.endChapter=5; plan.finalBatch=true;
+        plan.chapters=List.of(new ChapterBeat(5,"邻里和解","顾乔决定以后再找林秋宁，先向旧邻居道歉",900,
+                List.of("顾乔向旧邻居道歉，旧邻居接受；林秋宁的具体去向仍然不明，顾乔打算以后再查"),
+                "不揭示林秋宁的住处","顾乔打算以后继续调查"));
+        var candidate=new ModelGateway.Generated("最终规划",PlanNarrativeRenderer.render(plan),"顾乔与邻居和解",List.of(),plan);
+        var request=new ModelGateway.Request(Action.PLAN,novel,null,
+                new ContextAssembler.Context("{\"planStoryEngine\":{\"endingContract\":\"顾乔查清林秋宁的具体去向并理解母亲未寄信的缘由\"}}",
+                        List.of(),5,1),"");
+
+        Review review=modelGateway.review(request,candidate);
+
+        review.issueDetails().forEach(issue->System.out.println("LIVE_FINAL_PLAN_ISSUE="+issue.severity()+" "+issue.problem()));
+        assertThat(review.passed()).isFalse();
+        assertThat(review.issueDetails()).anyMatch(issue->"必须修正".equals(issue.severity()));
+    }
+
     @Test void realModelPlansAndReviewsAgainstIsolatedNovel() {
         boolean personalStake=Boolean.getBoolean("novelforge.acceptance.personalStake");
+        boolean fullStory=Boolean.getBoolean("novelforge.acceptance.fullStory");
         String synopsis=personalStake
                 ?"顾乔整理亡母遗物，发现一张没有日期的旧合照和一封母亲没有寄出的短笺。照片背面写着“林秋宁”，旧住户名单却找不到她。"
                     +"顾乔想弄清母亲为何留下这些东西；旧邻居被问到此人时回避，但顾乔尚不知道旧楼曾发生火灾。"
@@ -141,12 +287,79 @@ class LivePlanAcceptanceIT {
                 "LIVE_PLAN_ISSUE="+issue.severity()+" "+issue.problem()+" | 依据="+issue.evidence()
                         +" | 建议="+issue.suggestion()));
 
+        String planArtifactId=plan.id;
+        int planFixAttempt=0;
+        while(fullStory && !plan.latest().review.passed() && plan.latest().draftIssues.isEmpty()
+                && planFixAttempt<2) {
+            String guidance=plan.latest().review.issueDetails().stream()
+                    .filter(issue->"必须修正".equals(issue.severity()))
+                    .map(ReviewIssue::text).reduce((left,right)->left+"\n"+right).orElse("");
+            if(guidance.isBlank()) break;
+            Task repair=tasks.submit(novelId,Action.REWRITE,planArtifactId,
+                    "只修正当前章节规划中的硬性因果或预算问题，保留已成立的章节作用；不得改已确认大纲和正文。\n"+guidance,
+                    Novel.uid(),after.revision);
+            String repairTaskId=repair.id;
+            await().atMost(Duration.ofMinutes(7)).until(()->{
+                TaskStatus status=tasks.find(repository.get(novelId),repairTaskId).status;
+                return status!=TaskStatus.QUEUED && status!=TaskStatus.RUNNING;
+            });
+            after=repository.get(novelId);
+            Task repaired=tasks.find(after,repairTaskId);
+            plan=after.artifacts.stream().filter(a->a.id.equals(planArtifactId)).findFirst().orElseThrow();
+            planFixAttempt++;
+            System.out.println("LIVE_PLAN_FIX_TASK="+planFixAttempt+" "+repaired.status+" "+repaired.error);
+            if(plan.latest().review!=null) {
+                System.out.println("LIVE_PLAN_FIX_REVIEW="+planFixAttempt+" "+plan.latest().review.passed());
+                int round=planFixAttempt;
+                plan.latest().review.issueDetails().forEach(issue->System.out.println(
+                        "LIVE_PLAN_FIX_ISSUE="+round+" "+issue.severity()+" "+issue.problem()));
+            }
+            if(repaired.status!=TaskStatus.SUCCEEDED || plan.latest().review==null) break;
+        }
+
         if (!plan.latest().review.passed() || !plan.latest().draftIssues.isEmpty()) {
             System.out.println("LIVE_CHAIN_STOP=规划尚不能确认");
+            if(fullStory) assertThat(plan.latest().review.passed()).as("完整验收需要可确认的规划").isTrue();
             return;
         }
         Novel current=workflow.confirm(novelId,plan.id,plan.latest().id,after.revision,null);
-        for (int chapterNumber=1;chapterNumber<=2;chapterNumber++) {
+        int plannedEnd=plan.latest().plan.endChapter;
+        int stopAt=fullStory?10:Math.min(2,plannedEnd);
+        if(fullStory && plannedEnd>10) {
+            System.out.println("LIVE_CHAIN_STOP=超过本次十章验收调用预算，需另行评估");
+            assertThat(plannedEnd).as("本次验收调用预算").isLessThanOrEqualTo(10);
+            return;
+        }
+        int confirmedChapters=0;
+        for (int chapterNumber=1;chapterNumber<=stopAt;chapterNumber++) {
+            if(fullStory && "PLAN".equals(rules.nextAction(current))) {
+                Task nextPlanTask=tasks.submit(novelId,Action.PLAN,null,
+                        "承接已确认正文和未写完的前批规划，提前设计下一批。",Novel.uid(),current.revision);
+                String nextPlanTaskId=nextPlanTask.id;
+                await().atMost(Duration.ofMinutes(7)).until(()->{
+                    TaskStatus status=tasks.find(repository.get(novelId),nextPlanTaskId).status;
+                    return status!=TaskStatus.QUEUED && status!=TaskStatus.RUNNING;
+                });
+                current=repository.get(novelId);
+                Task nextPlanFinished=tasks.find(current,nextPlanTaskId);
+                System.out.println("LIVE_CHAIN_NEXT_PLAN_TASK="+nextPlanFinished.status+" "+nextPlanFinished.error);
+                Artifact nextPlan=current.artifacts.stream().filter(a->a.kind==Kind.PLAN && !a.clean())
+                        .reduce((first,second)->second).orElse(null);
+                if(nextPlan==null || nextPlanFinished.status!=TaskStatus.SUCCEEDED) break;
+                Version nextVersion=nextPlan.latest();
+                System.out.println("LIVE_CHAIN_NEXT_PLAN_REVIEW="+(nextVersion.review!=null && nextVersion.review.passed())
+                        +" "+nextVersion.draftIssues);
+                if(nextVersion.plan!=null) nextVersion.plan.chapters.forEach(beat->System.out.println(
+                        "LIVE_CHAIN_NEXT_PLAN_BEAT="+beat.number()+" "+beat.purpose()+" | 场景="+beat.sceneBeats()
+                                +" | 揭示边界="+beat.revealBoundary()+" | 章末="+beat.endingHook()));
+                if(nextVersion.review!=null) nextVersion.review.issueDetails().forEach(issue->System.out.println(
+                        "LIVE_CHAIN_NEXT_PLAN_ISSUE="+issue.severity()+" "+issue.problem()));
+                if(nextVersion.review==null || !nextVersion.review.passed() || !nextVersion.draftIssues.isEmpty()) break;
+                current=workflow.confirm(novelId,nextPlan.id,nextVersion.id,current.revision,null);
+                plannedEnd=nextVersion.plan.endChapter;
+            }
+            if(fullStory && "COMPLETE".equals(rules.nextAction(current))) break;
+            if(!"CHAPTER".equals(rules.nextAction(current))) break;
             Task chapterTask=tasks.submit(novelId,Action.CHAPTER,null,"",Novel.uid(),current.revision);
             String taskId=chapterTask.id;
             await().atMost(Duration.ofMinutes(7)).until(()->{
@@ -166,10 +379,98 @@ class LivePlanAcceptanceIT {
             if (version.review!=null) version.review.issueDetails().forEach(issue->System.out.println(
                     "LIVE_CHAIN_CHAPTER_ISSUE="+expected+" "+issue.severity()+" "+issue.problem()));
             System.out.println("LIVE_CHAIN_CHAPTER_PROSE="+chapterNumber+" "+version.content.replace("\n","\\n"));
+            if(fullStory && finished.status==TaskStatus.FAILED && version.review!=null
+                    && version.review.passed() && version.stateExtractionStatus==StateExtractionStatus.FAILED) {
+                String originalVersionId=version.id,originalProse=version.content;
+                Task retry=tasks.submitStateExtraction(novelId,chapter.id,Novel.uid(),current.revision);
+                String retryTaskId=retry.id;
+                await().atMost(Duration.ofMinutes(7)).until(()->{
+                    TaskStatus status=tasks.find(repository.get(novelId),retryTaskId).status;
+                    return status!=TaskStatus.QUEUED && status!=TaskStatus.RUNNING;
+                });
+                current=repository.get(novelId);
+                finished=tasks.find(current,retryTaskId);
+                version=current.artifacts.stream().filter(a->a.id.equals(chapter.id)).findFirst().orElseThrow().latest();
+                System.out.println("LIVE_CHAIN_STATE_RETRY="+chapterNumber+" "+finished.status+" "+finished.error);
+                assertThat(version.id).isEqualTo(originalVersionId);
+                assertThat(version.content).isEqualTo(originalProse);
+            }
+            int fixAttempt=0;
+            while(fullStory && finished.status==TaskStatus.SUCCEEDED && version.review!=null
+                    && !version.review.passed() && version.draftIssues.isEmpty() && fixAttempt<2) {
+                Task fix=tasks.submitContentFix(novelId,chapter.id,Novel.uid(),current.revision);
+                String fixTaskId=fix.id;
+                await().atMost(Duration.ofMinutes(7)).until(()->{
+                    TaskStatus status=tasks.find(repository.get(novelId),fixTaskId).status;
+                    return status!=TaskStatus.QUEUED && status!=TaskStatus.RUNNING;
+                });
+                current=repository.get(novelId);
+                finished=tasks.find(current,fixTaskId);
+                version=current.artifacts.stream().filter(a->a.id.equals(chapter.id)).findFirst().orElseThrow().latest();
+                fixAttempt++;
+                System.out.println("LIVE_CHAIN_FIX_TASK="+chapterNumber+" round="+fixAttempt+" "
+                        +finished.status+" "+finished.error);
+                System.out.println("LIVE_CHAIN_FIX_REVIEW="+chapterNumber+" round="+fixAttempt+" "
+                        +(version.review!=null && version.review.passed())+" "+version.draftIssues);
+                int completedRound=fixAttempt;
+                if(version.review!=null) version.review.issueDetails().forEach(issue->System.out.println(
+                        "LIVE_CHAIN_FIX_ISSUE="+expected+" round="+completedRound+" "+issue.severity()+" "+issue.problem()));
+                System.out.println("LIVE_CHAIN_FIX_PROSE="+chapterNumber+" round="+fixAttempt+" "
+                        +version.content.replace("\n","\\n"));
+            }
+            if(fullStory && finished.status==TaskStatus.FAILED && version.review!=null
+                    && version.review.passed() && version.stateExtractionStatus==StateExtractionStatus.FAILED) {
+                String savedVersionId=version.id,savedProse=version.content;
+                Task retry=tasks.submitStateExtraction(novelId,chapter.id,Novel.uid(),current.revision);
+                String retryTaskId=retry.id;
+                await().atMost(Duration.ofMinutes(7)).until(()->{
+                    TaskStatus status=tasks.find(repository.get(novelId),retryTaskId).status;
+                    return status!=TaskStatus.QUEUED && status!=TaskStatus.RUNNING;
+                });
+                current=repository.get(novelId);
+                finished=tasks.find(current,retryTaskId);
+                version=current.artifacts.stream().filter(a->a.id.equals(chapter.id)).findFirst().orElseThrow().latest();
+                System.out.println("LIVE_CHAIN_POST_FIX_STATE_RETRY="+chapterNumber+" "+finished.status+" "+finished.error);
+                assertThat(version.id).isEqualTo(savedVersionId);
+                assertThat(version.content).isEqualTo(savedProse);
+            }
             if (finished.status!=TaskStatus.SUCCEEDED || version.review==null || !version.review.passed()
                     || !version.draftIssues.isEmpty()) break;
             current=workflow.confirm(novelId,chapter.id,version.id,current.revision,null);
+            confirmedChapters++;
         }
+        if(!fullStory) return;
+        System.out.println("LIVE_CHAIN_CONFIRMED="+confirmedChapters+"/"+plannedEnd);
+        System.out.println("LIVE_CHAIN_NEXT_ACTION="+rules.nextAction(current));
+        System.out.println("LIVE_CHAIN_WORDS="+words.approvedWords(current));
+        if(!"COMPLETE".equals(rules.nextAction(current))) {
+            System.out.println("LIVE_CHAIN_STOP=十章验收预算内未进入完结检查，或存在待修订内容");
+            assertThat(rules.nextAction(current)).as("本次验收需进入完结检查").isEqualTo("COMPLETE");
+            return;
+        }
+        Task completionTask=tasks.submit(novelId,Action.COMPLETE,null,"",Novel.uid(),current.revision);
+        String completionTaskId=completionTask.id;
+        await().atMost(Duration.ofMinutes(7)).until(()->{
+            TaskStatus status=tasks.find(repository.get(novelId),completionTaskId).status;
+            return status!=TaskStatus.QUEUED && status!=TaskStatus.RUNNING;
+        });
+        current=repository.get(novelId);
+        Task completionFinished=tasks.find(current,completionTaskId);
+        System.out.println("LIVE_COMPLETION_TASK="+completionFinished.status+" "+completionFinished.error);
+        assertThat(completionFinished.status).as(completionFinished.error).isEqualTo(TaskStatus.SUCCEEDED);
+        assertThat(current.completionChecks).isNotEmpty();
+        Completion check=current.completionChecks.getLast();
+        System.out.println("LIVE_COMPLETION_REVIEW="+check.review().passed()+" mainline="
+                +check.review().mainlineResolved()+" ending="+check.review().endingClear()
+                +" foreshadow="+check.review().foreshadowingResolved());
+        check.review().issueDetails().forEach(issue->System.out.println(
+                "LIVE_COMPLETION_ISSUE="+issue.severity()+" "+issue.problem()));
+        if(check.review().passed() && check.review().mainlineResolved() && check.review().endingClear()
+                && check.review().foreshadowingResolved()) {
+            current=workflow.finish(novelId,check.id(),current.revision,true);
+            System.out.println("LIVE_COMPLETION_STATUS="+current.status);
+        }
+        assertThat(current.status).as("完整短篇的完结检查和作者确认").isEqualTo("COMPLETED");
     }
 
     @Test void realModelWritesFirstChapterFromAnApprovedShortSuspensePlan() {

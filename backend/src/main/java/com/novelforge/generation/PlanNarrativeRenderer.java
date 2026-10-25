@@ -2,6 +2,7 @@ package com.novelforge.generation;
 
 import com.novelforge.novel.Novel.ChapterBeat;
 import com.novelforge.novel.Novel.Plan;
+import com.novelforge.novel.Novel.ResolutionStep;
 
 /** Keeps the reader-facing plan and its summary derived from the same chapter beats. */
 public final class PlanNarrativeRenderer {
@@ -33,6 +34,14 @@ public final class PlanNarrativeRenderer {
             }
             if(!chapter.revealBoundary().isBlank()) text.append("\n揭示边界：").append(chapter.revealBoundary());
             if(!chapter.endingHook().isBlank()) text.append("\n章末局面：").append(chapter.endingHook());
+        }
+        if(plan.finalBatch && plan.resolutionSteps!=null && !plan.resolutionSteps.isEmpty()) {
+            text.append("\n\n结局如何落实：");
+            for(ResolutionStep step:plan.resolutionSteps)
+                text.append("\n- 第").append(step.chapterNumber()).append("章：").append(value(step.action()))
+                        .append("；依据：").append(value(step.evidenceSource()))
+                        .append("；结果：").append(value(step.expectedResult()))
+                        .append("；判断边界：").append(value(step.certaintyBoundary()));
         }
         text.append("\n\n批次衔接：").append(value(plan.handoff));
         if(!plan.finalBatch && !value(plan.triggerReason).isBlank())

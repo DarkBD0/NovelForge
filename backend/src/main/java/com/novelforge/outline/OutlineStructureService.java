@@ -20,7 +20,7 @@ import java.util.Set;
 /** Deterministic normalization, rendering, hashing and reference validation for outlines. */
 @Component
 public class OutlineStructureService {
-    public static final String VERSION="2026-10-15-outline-visible-contract-v5";
+    public static final String VERSION="2026-10-25-outline-ending-goals-v6";
     private final OutlineRenderer renderer;
     private final ObjectMapper canonicalMapper;
 
@@ -50,14 +50,23 @@ public class OutlineStructureService {
         required(issues,"故事核心",spec.storyCore); required(issues,"题材与叙事基调",spec.genreTone);
         required(issues,"主角目标",spec.protagonistGoal); required(issues,"核心冲突",spec.coreConflict);
         required(issues,"明确结局",spec.endingContract);
-        if ("2".equals(spec.schemaVersion) || "3".equals(spec.schemaVersion))
+        if ("2".equals(spec.schemaVersion) || modern(spec))
             required(issues,"核心吸引点",spec.readerAttraction);
+        if("4".equals(spec.schemaVersion)) nonEmpty(issues,"结局落点",spec.endingGoals);
         // Realistic stories may have no special world rule. Requiring one turns
         // ordinary procedures into artificial story machinery.
         nonEmpty(issues,"核心人物骨架",spec.characters);
         nonEmpty(issues,"全书结构",spec.parts);
 
         Set<String> ids=new HashSet<>(); Set<String> stageIds=new HashSet<>(); Set<String> requirementIds=new HashSet<>();
+        if(safe(spec.endingGoals).size()>3) issue(issues,"结局落点","核心结局目标过多",
+                "当前共 "+spec.endingGoals.size()+" 项","只保留一至三项真正决定全书是否结束的目标");
+        for (OutlineSpec.EndingGoal goal:safe(spec.endingGoals)) {
+            if(goal==null) { issue(issues,"结局落点","结局目标不能是空项","发现空条目","删除空条目或补全目标"); continue; }
+            id(issues,ids,"结局落点",goal.id);
+            required(issues,"结局落点",goal.goal);
+            required(issues,"结局成立条件",goal.proofStandard);
+        }
         for (OutlineSpec.RequirementTrace item:safe(spec.requirements)) {
             id(issues,ids,"需求追踪",item.id); if (notBlank(item.id)) requirementIds.add(item.id);
             required(issues,"需求追踪条目",item.text);
@@ -98,7 +107,7 @@ public class OutlineStructureService {
                 required(issues,"故事阶段标题",stage.title); required(issues,"故事阶段目标",stage.goal);
                 // Legacy outlines keep their original review contract. New outlines carry
                 // the dramatic and reader-facing bridge into rolling chapter plans.
-                if ("3".equals(spec.schemaVersion)) {
+                if (modern(spec)) {
                     required(issues,"故事阶段 > "+value(stage.title)+" > 读者期待",stage.readerPayoff);
                     required(issues,"故事阶段 > "+value(stage.title)+" > 阻力与抉择",stage.dramaticTurn);
                     required(issues,"故事阶段 > "+value(stage.title)+" > 阶段兑现",stage.payoffResult);
@@ -185,6 +194,7 @@ public class OutlineStructureService {
         issues.add(new ReviewIssue(location,problem,evidence,suggestion,"必须修正"));
     }
     private boolean notBlank(String value) { return value!=null&&!value.isBlank(); }
+    private boolean modern(OutlineSpec spec) { return "3".equals(spec.schemaVersion)||"4".equals(spec.schemaVersion); }
     private String value(String value) { return notBlank(value)?value:"空"; }
     private <T> List<T> safe(List<T> values) { return values==null?List.of():values; }
 }

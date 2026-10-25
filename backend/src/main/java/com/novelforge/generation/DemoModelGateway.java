@@ -71,6 +71,8 @@ public class DemoModelGateway implements ModelGateway {
                 revised.handoff=v.plan.handoff+"；承接已确认正文的最新调查结果";
                 revised.assumptions=v.plan.assumptions;
                 revised.chapters=new ArrayList<>(v.plan.chapters);
+                revised.resolutionSteps=v.plan.resolutionSteps==null?new ArrayList<>()
+                        :new ArrayList<>(v.plan.resolutionSteps);
                 return new Generated(v.title,v.content,v.summary,v.facts,revised);
             }
             return new Generated(v.title, v.content + "\n\n【离线演示修订示意】" + r.instructions(), v.summary, v.facts, v.plan);
@@ -85,13 +87,17 @@ public class DemoModelGateway implements ModelGateway {
     }
     private OutlineSpec demoOutline(Request r) {
         OutlineSpec spec=new OutlineSpec();
-        spec.schemaVersion="3";
+        spec.schemaVersion="4";
         spec.storyCore="林舟回到海港寻找失踪父亲，并查清灯塔停摆与秘密航线的关系";
         spec.readerAttraction="每找到一段航行记录，林舟都会更接近父亲，也更接近一场即将发生的海难";
         spec.genreTone="近代海港悬疑，以调查行动和父子关系为主";
         spec.protagonistGoal="找到父亲并公开能够证明秘密航线的证据";
         spec.coreConflict="林舟必须在风暴封港前取得证据，同时避免证人与父亲再次暴露";
         spec.endingContract="灯塔恢复，证据公开，秘密航线被终止，林舟与父亲重逢";
+        OutlineSpec.EndingGoal ending=new OutlineSpec.EndingGoal(); ending.id="ending_harbor";
+        ending.goal=spec.endingContract;
+        ending.proofStandard="正文呈现灯塔恢复、证据公开、航线终止及父子重逢的实际结果";
+        spec.endingGoals.add(ending);
         OutlineSpec.WorldRule rule=new OutlineSpec.WorldRule(); rule.id="world_harbor";
         rule.rule="港口行动受港务制度、潮汐和航路条件约束"; rule.scope="调查、出海和灯塔维护";
         rule.limit="没有许可不能进入封闭航道，风暴期间船只无法正常出港"; rule.cost="违规会失去调查资格并危及证人";
@@ -157,6 +163,10 @@ public class DemoModelGateway implements ModelGateway {
                 "调查线推进并回收铜钥匙和灯语伏笔，第五章明确结束主线",210,
                 List.of("人物在具体地点采取调查行动","行动产生一项可供下一章使用的新结果"),
                 "不提前公开后续章节才确认的幕后结论","以本章调查结果改变下一步行动"));
+        if(p.finalBatch) for(EndingGoalContract.Goal goal:EndingGoalContract.from(r.novel()))
+            p.resolutionSteps.add(new ResolutionStep(goal.id(),p.endChapter,
+                    "林舟取得航行记录、恢复灯塔并与父亲重逢","航行记录和当事人行动",
+                    goal.goal(),"不能把尚未发生的计划当作已经完成"));
         return new Generated("第" + r.context().batchNumber() + "批 · " + p.startChapter + "—" + p.endChapter + "章", "【离线演示使用短批次，便于验证提前规划，不代表真实批次章数】\n" + p.handoff, "灯塔调查与最终归航。", List.of(), p);
     }
     private Generated chapter(Request r) {

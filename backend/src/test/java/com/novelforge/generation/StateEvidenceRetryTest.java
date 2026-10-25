@@ -65,6 +65,48 @@ class StateEvidenceRetryTest {
         assertThat(validated.facts()).hasSize(1);
     }
 
+    @Test void retriesTooShortRelationEvidenceWithoutRegeneratingChapter() {
+        AtomicInteger calls=new AtomicInteger();
+        var result=StateEvidenceRetry.extractWithDiagnostics(r->{
+            if(calls.incrementAndGet()==1) return relationState("林");
+            assertThat(r.instructions()).contains("搜索该条目的主体名和动作关键词")
+                    .contains("不要改动正文","本地按条目关键词检索到以下原文候选句","林渡说，实习时理过工装清单。");
+            return relationState("林渡说，实习时理过工装清单。");
+        },request,chapter,policy);
+        assertThat(calls).hasValue(2);
+        assertThat(result.state().relations()).hasSize(1);
+        assertThat(result.warning()).isNull();
+    }
+
+    @Test void dropsOnlyInvalidShortEvidenceAfterBoundedRetry() {
+        AtomicInteger calls=new AtomicInteger();
+        var result=StateEvidenceRetry.extractWithDiagnostics(r->{
+            calls.incrementAndGet(); return relationState("林");
+        },request,chapter,policy);
+        assertThat(calls).hasValue(2);
+        assertThat(result.state().facts()).hasSize(1);
+        assertThat(result.state().entities()).hasSize(2);
+        assertThat(result.state().relations()).isEmpty();
+        assertThat(result.warning()).contains("已舍弃").contains("可单独重试");
+    }
+
+    @Test void focusedRetryKeepsValidFirstPassEntriesWhenSecondOnlyRepairsOneItem() {
+        AtomicInteger calls=new AtomicInteger();
+        var result=StateEvidenceRetry.extractWithDiagnostics(r->{
+            if(calls.incrementAndGet()==1) return new ModelGateway.StateExtraction(List.of(
+                    new ModelGateway.ExtractedState("fact_first","CHARACTER","林渡做过清单","ACTIVE",
+                            List.of("林渡说，实习时理过工装清单。")),
+                    new ModelGateway.ExtractedState("fact_second","EVENT","林渡说过往事","ACTIVE",List.of("林"))));
+            assertThat(r.instructions()).contains("优先修复该编号");
+            return new ModelGateway.StateExtraction(List.of(new ModelGateway.ExtractedState(
+                    "fact_second","EVENT","林渡说过往事","ACTIVE",
+                    List.of("林渡说，实习时理过工装清单。"))));
+        },request,chapter,policy);
+        assertThat(calls).hasValue(2);
+        assertThat(result.state().facts()).extracting(fact->fact.key())
+                .containsExactly("fact_first","fact_second");
+    }
+
     @Test void retriesOneMalformedJsonResponseWithoutRegeneratingChapter() {
         AtomicInteger calls=new AtomicInteger();
         var validated=StateEvidenceRetry.extractAndValidate(r->{
@@ -75,6 +117,29 @@ class StateEvidenceRetryTest {
         },request,chapter,policy);
         assertThat(calls).hasValue(2);
         assertThat(validated.facts()).hasSize(1);
+    }
+
+    @Test void retriesMissingRelationEndpointFieldWithoutRewritingProse() {
+        AtomicInteger calls=new AtomicInteger();
+        var result=StateEvidenceRetry.extractAndValidate(r->{
+            if(calls.incrementAndGet()==1)
+                throw new Problem(502,"模型 JSON 缺少必要字段或类型错误：toEntityKey 必须是非空文本");
+            assertThat(r.instructions()).contains("fromEntityKey 和 toEntityKey","不能确定关系两端时删除该关系");
+            return state("林渡说，实习时理过工装清单。");
+        },request,chapter,policy);
+        assertThat(calls).hasValue(2);
+        assertThat(result.facts()).hasSize(1);
+    }
+
+    @Test void warnsWhenSecondResponseSilentlyDropsFailedEntry() {
+        AtomicInteger calls=new AtomicInteger();
+        var result=StateEvidenceRetry.extractWithDiagnostics(r->{
+            if(calls.incrementAndGet()==1) return relationState("林");
+            return new ModelGateway.StateExtraction(List.of(),List.of(),List.of());
+        },request,chapter,policy);
+        assertThat(calls).hasValue(2);
+        assertThat(result.state().relations()).isEmpty();
+        assertThat(result.warning()).contains("已舍弃");
     }
 
     @Test void doesNotRetryNonFormatProviderFailure() {
@@ -104,5 +169,15 @@ class StateEvidenceRetryTest {
     private ModelGateway.StateExtraction state(String quote) {
         return new ModelGateway.StateExtraction(List.of(new ModelGateway.ExtractedState(
                 "fact_lin_du_experience","CHARACTER","林渡实习时理过工装清单","ACTIVE",List.of(quote))));
+    }
+
+    private ModelGateway.StateExtraction relationState(String quote) {
+        return new ModelGateway.StateExtraction(List.of(new ModelGateway.ExtractedState(
+                "fact_lin_du_experience","CHARACTER","林渡实习时理过工装清单","ACTIVE",
+                List.of("林渡说，实习时理过工装清单。"))),List.of(
+                new ModelGateway.ExtractedEntity("character_lin_du","CHARACTER","林渡",List.of(),"人物",List.of("林渡")),
+                new ModelGateway.ExtractedEntity("item_work_list","ITEM","工装清单",List.of(),"物品",List.of("工装清单"))),
+                List.of(new ModelGateway.ExtractedRelation("relation_lin_du_related_work_list",
+                        "character_lin_du","RELATED_TO","item_work_list","林渡提及工装清单", "ACTIVE",List.of(quote))));
     }
 }

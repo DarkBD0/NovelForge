@@ -1,5 +1,6 @@
 package com.novelforge.novel;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.novelforge.outline.OutlineSpec;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -139,7 +140,12 @@ public class Novel {
         public List<ChapterBeat> chapters = new ArrayList<>();
         /** Internal cross-chapter checkpoints, not a mandatory scene list or reader-facing prose. */
         public List<CriticalTransition> criticalTransitions = new ArrayList<>();
+        /** Planned proof for approved ending goals; a plan is never evidence that it happened. */
+        @JsonInclude(JsonInclude.Include.NON_EMPTY)
+        public List<ResolutionStep> resolutionSteps = new ArrayList<>();
     }
+    public record ResolutionStep(String goalId,int chapterNumber,String action,
+                                 String evidenceSource,String expectedResult,String certaintyBoundary) {}
     public record CriticalTransition(int chapterNumber, String subject, String before, String change,
                                      String after, String visibility, String evidenceTime,
                                      String inferenceBoundary) {

@@ -44,6 +44,23 @@ class OutlineStructureServiceTest {
         assertThat(renderer.render(after)).isEqualTo(renderer.render(before));
     }
 
+    @Test void explicitEndingGoalIsReadableAndRequiresItsOwnProofStandard() {
+        OutlineSpec spec=OutlineTestFixtures.validSpec(1000,"找回失踪姐姐");
+        OutlineSpec.EndingGoal goal=new OutlineSpec.EndingGoal();
+        goal.id="ending_where"; goal.goal="查明姐姐的去向";
+        spec.endingGoals=List.of(goal);
+        ModelGateway.Generated candidate=service.normalizeGenerated(novel(1000),
+                new ModelGateway.Generated("大纲","忽略","摘要",List.of(),null,spec,List.of()));
+        assertThat(service.validate(novel(1000),candidate,null).issueDetails())
+                .anyMatch(issue->issue.location().contains("结局成立条件"));
+        goal.proofStandard="可信信息确定她所在城市，不要求详细住址";
+        ModelGateway.Generated complete=service.normalizeGenerated(novel(1000),
+                new ModelGateway.Generated("大纲","忽略","摘要",List.of(),null,spec,List.of()));
+        assertThat(service.validate(novel(1000),complete,null).passed()).isTrue();
+        assertThat(complete.content()).contains("结局落点","查明姐姐的去向","不要求详细住址")
+                .doesNotContain("ending_where");
+    }
+
     @Test void functionalCharactersStayConciseWhileLegacyOutlinesRemainReadable() {
         OutlineSpec spec=OutlineTestFixtures.validSpec(1000,"保持主线");
         OutlineSpec.CharacterArc witness=new OutlineSpec.CharacterArc();
@@ -80,6 +97,19 @@ class OutlineStructureServiceTest {
                 new ModelGateway.Generated("全书大纲","忽略","摘要",List.of(),null,spec,List.of()));
         assertThat(service.validate(novel(1000),complete,null).passed()).isTrue();
         assertThat(complete.content()).contains("读者期待","阻力与抉择","阶段兑现","后续变化");
+
+        spec.schemaVersion="4";
+        ModelGateway.Generated missingEndingGoals=service.normalizeGenerated(novel(1000),
+                new ModelGateway.Generated("大纲","忽略","摘要",List.of(),null,spec,List.of()));
+        assertThat(service.validate(novel(1000),missingEndingGoals,null).issueDetails())
+                .anyMatch(issue->issue.location().contains("结局落点"));
+        OutlineSpec.EndingGoal endingGoal=new OutlineSpec.EndingGoal();
+        endingGoal.id="ending_main"; endingGoal.goal="救出父亲";
+        endingGoal.proofStandard="正文呈现父亲脱困并与主角重逢";
+        spec.endingGoals=List.of(endingGoal);
+        ModelGateway.Generated completeV4=service.normalizeGenerated(novel(1000),
+                new ModelGateway.Generated("大纲","忽略","摘要",List.of(),null,spec,List.of()));
+        assertThat(service.validate(novel(1000),completeV4,null).passed()).isTrue();
 
         spec.schemaVersion="2";
         stage.readerPayoff=null; stage.dramaticTurn=null; stage.payoffResult=null; stage.escalation=null;

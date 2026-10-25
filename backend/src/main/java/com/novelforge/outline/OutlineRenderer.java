@@ -60,9 +60,9 @@ public class OutlineRenderer {
                 out.append('\n');
                 line(out,"目标",stage.goal);
                 line(out,"读者期待",stage.readerPayoff);
-                if ("3".equals(spec.schemaVersion)) line(out,"阻力与抉择",stage.dramaticTurn);
+                if (modern(spec)) line(out,"阻力与抉择",stage.dramaticTurn);
                 line(out,"阶段兑现",stage.payoffResult);
-                line(out,"3".equals(spec.schemaVersion)?"后续变化":"下一步升级",stage.escalation);
+                line(out,modern(spec)?"后续变化":"下一步升级",stage.escalation);
                 for (OutlineSpec.KeyEvent event:safe(stage.events)) {
                     out.append("- ").append(text(event.title)).append("：").append(text(event.event));
                     appendDetail(out,"后果",event.consequence); appendDetail(out,"人物变化",event.characterChange);
@@ -82,6 +82,12 @@ public class OutlineRenderer {
         }
 
         section(out,"明确结局",spec.endingContract);
+        if(!safe(spec.endingGoals).isEmpty()) {
+            out.append("\n## 结局落点\n");
+            for(OutlineSpec.EndingGoal goal:safe(spec.endingGoals)) if(goal!=null)
+                out.append("- ").append(text(goal.goal)).append("；成立条件：")
+                        .append(text(goal.proofStandard)).append('\n');
+        }
         return out.toString().strip();
     }
 
@@ -98,5 +104,6 @@ public class OutlineRenderer {
         if (value!=null&&!value.isBlank()) out.append("；").append(label).append("：").append(value.strip());
     }
     private String text(String value) { return value==null||value.isBlank()?"待完善":value.strip(); }
+    private boolean modern(OutlineSpec spec) { return "3".equals(spec.schemaVersion)||"4".equals(spec.schemaVersion); }
     private <T> java.util.List<T> safe(java.util.List<T> values) { return values==null?java.util.List.of():values; }
 }

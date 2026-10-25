@@ -26,6 +26,37 @@ class PlanCausalityAuditTest {
         assertThat(result.issueDetails().getFirst().evidence()).contains("火后拍下的合照中出现陈小满","陈小满在火灾中死亡");
     }
 
+    @Test void groundsUnverifiableClueAgainstTheSameChaptersGoal() throws Exception {
+        Plan plan=new Plan(); plan.startChapter=4; plan.endChapter=5;
+        plan.chapters=List.of(new ChapterBeat(4,"线索","顾乔获得可独立核实的具体去向",900,
+                List.of("邻居只记得林秋宁投奔南边亲戚，具体城市不确定"),"",""),
+                new ChapterBeat(5,"寻找","顾乔直接根据邻居提供的地点找到地址"));
+        PlanCausalityAudit audit=new PlanCausalityAudit(List.of(new PlanCausalityAudit.Finding(
+                "第四章","章目标和可用线索不匹配","顾乔获得可独立核实的具体去向",
+                "具体城市不确定","给出可核实的迁出登记或另一个具体途径","必须修正")));
+
+        Review result=audit.merge(clear(),generated(plan),mapper.readTree("{}"));
+
+        assertThat(result.passed()).isFalse();
+        assertThat(result.issueDetails()).singleElement().satisfies(issue->
+                assertThat(issue.evidence()).contains("可独立核实的具体去向","具体城市不确定"));
+    }
+
+    @Test void finalPlanCanUseConfirmedOutlineEndingAsEvidence() throws Exception {
+        Plan plan=new Plan(); plan.startChapter=5; plan.endChapter=5; plan.finalBatch=true;
+        plan.chapters=List.of(new ChapterBeat(5,"和解","顾乔决定以后再找林秋宁，先向邻居道歉"));
+        var context=mapper.readTree("{\"planStoryEngine\":{\"endingContract\":\"顾乔查清林秋宁的具体去向\"}}");
+        var audit=new PlanCausalityAudit(List.of(new PlanCausalityAudit.Finding(
+                "最终章","大纲要求的核心去向仍未查明","顾乔决定以后再找林秋宁",
+                "顾乔查清林秋宁的具体去向","在最终章安排可信的核实行动或修改最终批次","必须修正")));
+
+        Review result=audit.merge(clear(),generated(plan),context);
+
+        assertThat(result.passed()).isFalse();
+        assertThat(result.issueDetails()).singleElement().satisfies(issue->
+                assertThat(issue.evidence()).contains("以后再找林秋宁","查清林秋宁的具体去向"));
+    }
+
     @Test void doesNotBlockPreFirePhotoOrInventMissingHandoff() throws Exception {
         Plan plan=plan("第六章，陈小满在火灾中死亡", "第七章，找到火灾前拍下的合照");
         PlanCausalityAudit audit=new PlanCausalityAudit(List.of(new PlanCausalityAudit.Finding(

@@ -144,6 +144,9 @@ class HttpModelGatewayTest {
         String text=mapper.writeValueAsString(value);
         queuedResponses.add(mapper.writeValueAsString(Map.of("choices",List.of(Map.of("finish_reason","stop","message",Map.of("content",text))))));
     }
+    void queueReplyText(String text) throws Exception {
+        queuedResponses.add(mapper.writeValueAsString(Map.of("choices",List.of(Map.of("finish_reason","stop","message",Map.of("content",text))))));
+    }
     HttpModelGateway gateway() { return new HttpModelGateway(mapper,baseUrl,"","fixture",5,1000,"max_tokens","none"); }
     ModelGateway.Generated generated() {
         return new ModelGateway.Generated("大纲","他说：\"线索{甲}[乙]\"。\n路径 C:\\book；结局明确。","摘要",List.of(new Fact("clue","FORESHADOW","线索已揭示","RESOLVED")),null);
@@ -287,6 +290,38 @@ class HttpModelGatewayTest {
         response.set("{invalid}");
         assertThatThrownBy(()->gateway.generate(request())).hasMessageContaining("解析失败");
     }
+    @Test void chapterRetriesMalformedFinalJsonOnceBeforePersistingCandidate() throws Exception {
+        queueReplyText("{\"title\":\"第一章\",\"content\":\"引号\"没转义\"}");
+        queueReply(new ModelGateway.Generated("第一章","她推开门。","她进屋。",List.of(),null));
+
+        ModelGateway.Generated result=gateway().generate(chapterRequest());
+
+        assertThat(result.content()).isEqualTo("她推开门。");
+        assertThat(calls.get()).isEqualTo(2);
+        assertThat(mapper.readTree(received.get()).path("messages").get(1).path("content").asText())
+                .contains("responseFormatReminder","上一次模型响应的 JSON 语法或字段类型错误");
+    }
+    @Test void planRetriesWrongJsonFieldTypeBeforeStagingCandidate() throws Exception {
+        queueReplyText("{\"title\":\"章节规划\",\"content\":\"草案\",\"summary\":\"摘要\",\"facts\":[],\"plan\":[]}");
+        Plan plan=new Plan(); plan.startChapter=1; plan.endChapter=1; plan.prepareNextAfterChapter=1;
+        plan.finalBatch=true; plan.triggerReason="开篇规划"; plan.handoff="故事收束"; plan.assumptions="无";
+        plan.chapters=List.of(new ChapterBeat(1,"结束","故事得到结局",500,List.of(),"",""));
+        queueReply(new ModelGateway.Generated("章节规划",PlanNarrativeRenderer.render(plan),"摘要",List.of(),plan));
+
+        ModelGateway.Generated result=gateway().generate(planRequest());
+
+        assertThat(result.plan()).isNotNull();
+        assertThat(result.plan().endChapter).isEqualTo(1);
+        assertThat(calls.get()).isEqualTo(2);
+    }
+    @Test void chapterStopsAfterOneMalformedJsonRetry() throws Exception {
+        queueReplyText("{\"content\":\"坏\"引号\"}");
+        queueReplyText("{\"content\":\"还是\"坏\"}");
+
+        assertThatThrownBy(()->gateway().generate(chapterRequest()))
+                .hasMessageContaining("已自动重试 1 次").hasMessageContaining("原有内容未覆盖");
+        assertThat(calls.get()).isEqualTo(2);
+    }
     @Test void rewriteUsesSmallVerifiedPatchInsteadOfReturningWholeArtifact() throws Exception {
         reply(factPatch("王阿姨是宿舍管理员，习惯把现金藏在家中"),"stop");
         ModelGateway.Generated result=gateway().generate(rewriteRequest());
@@ -312,6 +347,13 @@ class HttpModelGatewayTest {
                 "只补充摘要，不修改正文");
         reply(Map.of("operations",List.of(Map.of("op","SET_FIELD","field","summary","value","新摘要"))),"stop");
         assertThat(gateway().generate(summaryOnly).summary()).isEqualTo("新摘要");
+
+        ModelGateway.Request realSummaryInstruction=new ModelGateway.Request(full.action(),full.novel(),full.target(),full.context(),
+                "只修正当前内容摘要中与正文不一致的表述，不修改标题、正文、档案增量或章节规划。");
+        reply(Map.of("operations",List.of(Map.of("op","SET_FIELD","field","summary","value","修正后的摘要"))),"stop");
+        ModelGateway.Generated corrected=gateway().generate(realSummaryInstruction);
+        assertThat(corrected.summary()).isEqualTo("修正后的摘要");
+        assertThat(corrected.content()).isEqualTo(full.target().latest().content);
     }
     @Test void missingConfigurationAndInsecureRemoteEndpointsFailClearly() {
         var missing=new HttpModelGateway(mapper,"","","",5,1000,"max_tokens","none");
@@ -783,6 +825,69 @@ class HttpModelGatewayTest {
         Review checked=gateway().review(chapterRewriteRequest(),candidate);
         assertThat(checked.passed()).isFalse();
         assertThat(checked.issues()).anyMatch(issue->issue.contains("勒索姚远致其自杀"));
+    }
+
+    @Test void endingGoalCannotPassChapterCheckFromAPlanOrAWeakerRumor() throws Exception {
+        String requirement="结局目标“查清姐姐的具体去向”：联系本人；依据来源：本人回应；必须得到：所在城市；不得越过：不能推断详细住址";
+        String content="老邻居说，她大概去了南边。顾乔决定以后继续找。";
+        Novel novel=new Novel();
+        Artifact target=new Artifact(); target.kind=Kind.CHAPTER; target.chapterNumber=1;
+        Version previous=new Version(); previous.content="旧稿"; target.versions.add(previous);
+        novel.artifacts.add(target);
+        String context=mapper.writeValueAsString(Map.of("currentChapterPlan",
+                Map.of("acceptanceItems",List.of(requirement),"resolutionRequirements",List.of(requirement))));
+        ModelGateway.Request request=new ModelGateway.Request(Action.REVIEW,novel,target,
+                new ContextAssembler.Context(context,List.of(),1,1),"");
+        queueReply(new Review(true,List.of(),false,false,false));
+        queueReply(new ChapterEvidenceAudit(List.of(
+                new ChapterEvidenceAudit.Check(requirement,false,List.of())),List.of()));
+
+        Review checked=gateway().review(request,new ModelGateway.Generated("第一章",content,"继续寻找",List.of(),null));
+
+        assertThat(checked.passed()).isFalse();
+        assertThat(checked.issueDetails()).anySatisfy(issue->assertThat(issue.problem()).contains("查清姐姐的具体去向"));
+        var input=mapper.readTree(mapper.readTree(received.get()).path("messages").get(1).path("content").asText());
+        assertThat(input.path("planAcceptanceItems").get(0).asText()).isEqualTo(requirement);
+    }
+
+    @Test void focusedChapterAuditBlocksVerbatimContradictoryClueCarrier() throws Exception {
+        String first="顾乔把短笺翻过来。背面写着一个名字：林秋宁。";
+        String second="她又看了看照片背面的林秋宁三个字。";
+        String content=first+second;
+        queueReply(new Review(true,List.of(),false,false,false));
+        queueReply(new ChapterEvidenceAudit(List.of(),List.of(),List.of(
+                new ChapterEvidenceAudit.NarrativeFinding("同一名字被写在两件不同物品背面",
+                        first,second,"统一名字所在的物品","必须修正"))));
+
+        Review checked=gateway().review(simpleChapterReviewRequest(),
+                new ModelGateway.Generated("第一章",content,"顾乔发现署名",List.of(),null));
+
+        assertThat(checked.passed()).isFalse();
+        assertThat(checked.issueDetails()).anySatisfy(issue->
+                assertThat(issue.evidence()).contains(first,second));
+    }
+
+    @Test void focusedChapterAuditIgnoresFindingWithoutTwoVerbatimQuotes() throws Exception {
+        String content="顾乔把照片翻过来，看见林秋宁的名字。";
+        queueReply(new Review(true,List.of(),false,false,false));
+        queueReply(new ChapterEvidenceAudit(List.of(),List.of(),List.of(
+                new ChapterEvidenceAudit.NarrativeFinding("虚构的矛盾",
+                        "顾乔把照片翻过来","短笺背面写着林秋宁","不需要修改","必须修正"))));
+
+        Review checked=gateway().review(simpleChapterReviewRequest(),
+                new ModelGateway.Generated("第一章",content,"顾乔发现署名",List.of(),null));
+
+        assertThat(checked.passed()).isTrue();
+        assertThat(checked.issueDetails()).isEmpty();
+    }
+
+    private ModelGateway.Request simpleChapterReviewRequest() {
+        Novel novel=new Novel();
+        Artifact target=new Artifact(); target.kind=Kind.CHAPTER; target.chapterNumber=1;
+        Version previous=new Version(); previous.content="旧稿"; target.versions.add(previous);
+        novel.artifacts.add(target);
+        return new ModelGateway.Request(Action.REVIEW,novel,target,
+                new ContextAssembler.Context("{}",List.of(),1,1),"");
     }
     @Test void auditsCompoundArchiveByAtomicClaimAndNeverAsksProseToProveIt() throws Exception {
         String detail="王阿姨藏起现金，并把钥匙交给张洋";

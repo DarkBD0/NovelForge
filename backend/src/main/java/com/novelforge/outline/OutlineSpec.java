@@ -1,5 +1,6 @@
 package com.novelforge.outline;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -16,6 +17,9 @@ public class OutlineSpec {
     public String protagonistGoal;
     public String coreConflict;
     public String endingContract;
+    /** Optional for older approved outlines; concrete proof obligations for the ending. */
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    public List<EndingGoal> endingGoals=new ArrayList<>();
     public List<RequirementTrace> requirements=new ArrayList<>();
     public List<WorldRule> worldRules=new ArrayList<>();
     public List<CharacterArc> characters=new ArrayList<>();
@@ -24,6 +28,14 @@ public class OutlineSpec {
     public List<StoryThread> threads=new ArrayList<>();
     public List<Constraint> constraints=new ArrayList<>();
     public List<String> creativeAssumptions=new ArrayList<>();
+
+    public static class EndingGoal {
+        public String id;
+        /** A story question or outcome that the ending must answer. */
+        public String goal;
+        /** What the confirmed prose must establish, appropriate to this genre. */
+        public String proofStandard;
+    }
 
     public static class RequirementTrace {
         public String id;

@@ -51,6 +51,9 @@ final class ModelJsonReader {
                 if(node instanceof ObjectNode object
                         && (node.path("claimChecks").isMissingNode() || node.path("claimChecks").isNull()))
                     object.set("claimChecks",mapper.createArrayNode());
+                if(node instanceof ObjectNode object
+                        && (node.path("narrativeFindings").isMissingNode() || node.path("narrativeFindings").isNull()))
+                    object.set("narrativeFindings",mapper.createArrayNode());
                 validateEvidenceAudit(node);
             } else if (type == PlanCausalityAudit.class) {
                 require(node.path("findings").isArray(),"findings 必须是数组（没有因果问题时使用 []）");
@@ -105,6 +108,19 @@ final class ModelJsonReader {
                     else if(object.path("outlineSpec").isObject()
                             && (object.path("facts").isMissingNode() || object.path("facts").isNull()))
                         object.set("facts",mapper.createArrayNode());
+                    if(object.path("outlineSpec").isObject()) {
+                        ObjectNode spec=(ObjectNode)object.path("outlineSpec");
+                        JsonNode goals=spec.path("endingGoals");
+                        if(!goals.isMissingNode() && !goals.isNull() && !goals.isArray()) {
+                            spec.set("endingGoals",mapper.createArrayNode());
+                            draftIssues.add("结局目标格式不完整，请修订大纲后重新检查");
+                        } else if(goals.isArray()) {
+                            ArrayNode safe=mapper.createArrayNode();
+                            goals.forEach(item->{ if(item.isObject()) safe.add(item.deepCopy()); });
+                            if(safe.size()!=goals.size()) draftIssues.add("结局目标包含空条目，请修订大纲后重新检查");
+                            spec.set("endingGoals",safe);
+                        }
+                    }
                 }
                 strings(node, "title");
                 JsonNode summaryNode=node.path("summary");
@@ -121,6 +137,7 @@ final class ModelJsonReader {
                 normalizePlanNumbers(node.path("plan"));
                 if (node.path("plan").isObject()) {
                     normalizeCriticalTransitions((ObjectNode)node.path("plan"));
+                    normalizeResolutionSteps((ObjectNode)node.path("plan"));
                     validatePlan(node.path("plan"));
                 }
                 List<Fact> facts=new ArrayList<>();
@@ -215,6 +232,13 @@ final class ModelJsonReader {
                 for (JsonNode evidence : check.path("evidence")) require(evidence.isTextual()&&!evidence.asText().isBlank(),field+".evidence 必须是非空文本");
             }
         }
+        require(node.path("narrativeFindings").isArray(),"narrativeFindings 必须是数组");
+        require(node.path("narrativeFindings").size()<=4,"narrativeFindings 最多四项");
+        for(JsonNode finding:node.path("narrativeFindings")) {
+            strings(finding,"problem","firstQuote","secondQuote","suggestion","severity");
+            require(List.of("必须修正","作者决定").contains(finding.path("severity").asText()),
+                    "narrativeFindings.severity 不受支持");
+        }
     }
 
     private void validatePatch(JsonNode node) {
@@ -245,6 +269,7 @@ final class ModelJsonReader {
                 case "SET_PLAN" -> {
                     require(operation.path("plan").isObject(),"SET_PLAN.plan 必须是对象");
                     normalizeCriticalTransitions((ObjectNode)operation.path("plan"));
+                    normalizeResolutionSteps((ObjectNode)operation.path("plan"));
                     validatePlan(operation.path("plan"));
                 }
                 default -> require(false,"未知修订操作 "+operation.path("op").asText());
@@ -336,6 +361,8 @@ final class ModelJsonReader {
             normalizeChapterOrdinal(object,field);
         if (object.path("chapters").isArray()) for (JsonNode chapter : object.path("chapters"))
             if (chapter instanceof ObjectNode chapterObject) normalizeChapterOrdinal(chapterObject,"number");
+        if (object.path("resolutionSteps").isArray()) for (JsonNode step : object.path("resolutionSteps"))
+            if (step instanceof ObjectNode stepObject) normalizeChapterOrdinal(stepObject,"chapterNumber");
     }
 
     private void normalizeChapterOrdinal(ObjectNode object,String field) {
@@ -457,6 +484,21 @@ final class ModelJsonReader {
             valid.add(cleaned);
         }
         plan.set("criticalTransitions",valid);
+    }
+    /** Invalid optional proof hints become reviewable missing obligations, not lost plan drafts. */
+    private void normalizeResolutionSteps(ObjectNode plan) {
+        JsonNode raw=plan.path("resolutionSteps");
+        ArrayNode valid=mapper.createArrayNode();
+        if(raw.isArray()) for(JsonNode entry:raw) {
+            if(valid.size()>=8) break;
+            if(!entry.path("chapterNumber").isIntegralNumber()
+                    || !entry.path("chapterNumber").canConvertToInt()) continue;
+            boolean complete=true;
+            for(String field:List.of("goalId","action","evidenceSource","expectedResult","certaintyBoundary"))
+                if(!entry.path(field).isTextual() || entry.path(field).asText().isBlank()) complete=false;
+            if(complete) valid.add(entry.deepCopy());
+        }
+        plan.set("resolutionSteps",valid);
     }
     private void strings(JsonNode node, String... fields) {
         for (String field : fields)
